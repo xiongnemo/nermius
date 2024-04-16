@@ -1,0 +1,124 @@
+name: Build Artifacts
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BINARY_NAME: nermius
+  CGO_ENABLED: "0"
+
+jobs:
+  targets:
+    name: Prepare Target Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - id: generate
+        name: Generate standalone target matrix
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import subprocess
+
+          binary_name = os.environ["BINARY_NAME"]
+          # Keep this list opt-in only. The repository does not cross-build on
+          # every GOOS/GOARCH pair exposed by `go tool dist list`, and new Go
+          # releases may add extra targets such as freebsd/riscv64 that would
+          # otherwise start failing the workflow automatically.
+          allowed_targets = [
+              "darwin/amd64",
+              "darwin/arm64",
+              "freebsd/amd64",
+              "freebsd/arm64",
+              "linux/386",
+              "linux/amd64",
+              "linux/arm",
+              "linux/arm64",
+              "linux/loong64",
+              "linux/ppc64le",
+              "linux/riscv64",
+              "linux/s390x",
+              "openbsd/amd64",
+              "openbsd/arm64",
+              "windows/386",
+              "windows/amd64",
+              "windows/arm64",
+          ]
+
+          targets = []
+          available_targets = set(subprocess.check_output(["go", "tool", "dist", "list"], text=True).splitlines())
+          for target in allowed_targets:
+              if target not in available_targets:
+                  continue
+              goos, goarch = target.split("/", 1)
+              ext = ".exe" if goos == "windows" else ""
+              artifact = f"{binary_name}-{goos}-{goarch}"
+              archive = f"{artifact}.tar.gz"
+              targets.append({
+                  "goos": goos,
+                  "goarch": goarch,
+                  "ext": ext,
+                  "artifact": artifact,
+                  "archive": archive,
+              })
+
+          print(f"matrix={json.dumps({'include': targets})}")
+          PY
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          EXT: ${{ matrix.ext }}
+          ARTIFACT: ${{ matrix.artifact }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          mkdir -p dist
+          output="${ARTIFACT}${EXT}"
+          go build -trimpath -ldflags="-s -w" -o "dist/${output}" .
+          sha256sum "dist/${output}" > "dist/${output}.sha256"
+          tar -C dist -czf "dist/${ARCHIVE}" "${output}" "${output}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14
