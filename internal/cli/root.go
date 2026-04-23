@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/nermius/nermius/internal/buildinfo"
 	"github.com/nermius/nermius/internal/config"
 	"github.com/nermius/nermius/internal/domain"
 	"github.com/nermius/nermius/internal/service"
@@ -29,13 +30,24 @@ type runtime struct {
 
 func Execute() error {
 	rt := &runtime{}
+	return newRootCommand(rt).Execute()
+}
+
+func newRootCommand(rt *runtime) *cobra.Command {
+	info := buildinfo.Current()
 	root := &cobra.Command{
 		Use:   "nermius",
 		Short: "Portable SSH manager with CLI and TUI workflows",
+		Long: fmt.Sprintf(
+			"Portable SSH manager with CLI and TUI workflows\n\nVersion: %s\nBuild Time: %s",
+			info.Version,
+			info.BuildTime,
+		),
 	}
 	root.PersistentFlags().StringVar(&rt.vaultPath, "vault", "", "Path to vault SQLite file")
 	root.PersistentFlags().CountVarP(&rt.verbose, "verbose", "v", "Increase debug verbosity (-v, -vv, -vvv)")
 	root.AddCommand(
+		rt.newVersionCmd(),
 		rt.newVaultCmd(),
 		rt.newInstallCmd(),
 		rt.newKnownHostsCmd(),
@@ -51,7 +63,7 @@ func Execute() error {
 		rt.newExecCmd(),
 		rt.newTUICmd(),
 	)
-	return root.Execute()
+	return root
 }
 
 func (r *runtime) paths() (config.Paths, error) {
@@ -102,6 +114,17 @@ func (r *runtime) newVaultCmd() *cobra.Command {
 		r.newVaultChangePasswordCmd(),
 	)
 	return cmd
+}
+
+func (r *runtime) newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the current build version",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), buildinfo.Current().Version)
+			return err
+		},
+	}
 }
 
 func (r *runtime) newVaultInitCmd() *cobra.Command {

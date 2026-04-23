@@ -3,11 +3,13 @@ package tui
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/nermius/nermius/internal/domain"
 	"github.com/nermius/nermius/internal/service"
+	"github.com/nermius/nermius/internal/store"
 	"github.com/nermius/nermius/internal/termemu"
 )
 
@@ -139,6 +141,32 @@ func TestAdjustScrollOffsetClamps(t *testing.T) {
 	app.adjustScrollOffset(session, -10, 3)
 	if got := app.scrollOffsetForSession(session); got != 0 {
 		t.Fatalf("scroll offset = %d, want 0", got)
+	}
+}
+
+func TestListColumnWidthsExpandLabelOnWideScreen(t *testing.T) {
+	items := []store.DocumentSummary{
+		{UpdatedAt: time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)},
+	}
+	idWidth, labelWidth, updatedWidth := listColumnWidths(140, items)
+	if idWidth != 36 {
+		t.Fatalf("id width = %d, want 36", idWidth)
+	}
+	if labelWidth <= 24 {
+		t.Fatalf("label width = %d, want > 24 on a wide screen", labelWidth)
+	}
+	if updatedWidth < len(time.Now().UTC().Format(time.RFC3339)) {
+		t.Fatalf("updated width = %d, too small", updatedWidth)
+	}
+}
+
+func TestListColumnWidthsShrinkIDBeforeLabel(t *testing.T) {
+	idWidth, labelWidth, _ := listColumnWidths(60, nil)
+	if idWidth >= 36 {
+		t.Fatalf("id width = %d, expected shrink below 36", idWidth)
+	}
+	if labelWidth < 12 {
+		t.Fatalf("label width = %d, want at least 12", labelWidth)
 	}
 }
 

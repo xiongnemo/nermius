@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/nermius/nermius/internal/domain"
@@ -56,5 +57,40 @@ func TestBuildKnownHostsConfig(t *testing.T) {
 	}
 	if cfg.Policy != domain.KnownHostsStrict || cfg.Backend != domain.KnownHostsBackendVault || cfg.Path != "~/.ssh/known_hosts" {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestRootHelpIncludesBuildMetadata(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	help := out.String()
+	if !bytes.Contains([]byte(help), []byte("Version:")) {
+		t.Fatalf("expected help to include version metadata, got:\n%s", help)
+	}
+	if !bytes.Contains([]byte(help), []byte("Build Time:")) {
+		t.Fatalf("expected help to include build time metadata, got:\n%s", help)
+	}
+	if !bytes.Contains([]byte(help), []byte("version")) {
+		t.Fatalf("expected help to list version subcommand, got:\n%s", help)
+	}
+}
+
+func TestVersionCommandPrintsVersionString(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"version"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(version) returned error: %v", err)
+	}
+	if len(bytes.TrimSpace(out.Bytes())) == 0 {
+		t.Fatal("expected version command output")
 	}
 }

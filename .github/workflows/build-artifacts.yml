@@ -111,7 +111,31 @@ jobs:
         run: |
           mkdir -p dist
           output="${ARTIFACT}${EXT}"
-          go build -trimpath -ldflags="-s -w" -o "dist/${output}" .
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          if [ "$branch" = "HEAD" ]; then
+            branch="detached"
+          fi
+          commit="$(git rev-parse --short=12 HEAD)"
+          dirty="false"
+          if ! git diff --quiet --ignore-submodules HEAD --; then
+            dirty="true"
+          fi
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags=(
+            "-s"
+            "-w"
+            "-X"
+            "github.com/nermius/nermius/internal/buildinfo.baseVersion=v0.0.1"
+            "-X"
+            "github.com/nermius/nermius/internal/buildinfo.gitBranch=${branch}"
+            "-X"
+            "github.com/nermius/nermius/internal/buildinfo.gitCommit=${commit}"
+            "-X"
+            "github.com/nermius/nermius/internal/buildinfo.gitDirty=${dirty}"
+            "-X"
+            "github.com/nermius/nermius/internal/buildinfo.buildTime=${build_time}"
+          )
+          go build -trimpath -ldflags="${ldflags[*]}" -o "dist/${output}" .
           sha256sum "dist/${output}" > "dist/${output}.sha256"
           tar -C dist -czf "dist/${ARCHIVE}" "${output}" "${output}.sha256"
 

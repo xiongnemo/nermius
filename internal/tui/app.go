@@ -332,7 +332,8 @@ func (a *App) render() {
 
 func (a *App) renderList(w, h int) {
 	items := a.currentRecords()
-	header := fmt.Sprintf("%-38s %-24s %s", "ID", "LABEL", "UPDATED")
+	idWidth, labelWidth, updatedWidth := listColumnWidths(w, items)
+	header := formatListRow("ID", "LABEL", "UPDATED", idWidth, labelWidth, updatedWidth)
 	drawText(a.screen, 0, 1, tcell.StyleDefault.Foreground(tcell.ColorYellow), truncate(header, w))
 	for i := 0; i < h-3 && i < len(items); i++ {
 		item := items[i]
@@ -340,7 +341,7 @@ func (a *App) renderList(w, h int) {
 		if i == a.cursor {
 			style = style.Background(tcell.ColorDarkSlateGray)
 		}
-		line := fmt.Sprintf("%-38s %-24s %s", item.ID, truncate(item.Label, 24), item.UpdatedAt.Format(time.RFC3339))
+		line := formatListRow(item.ID, item.Label, item.UpdatedAt.Format(time.RFC3339), idWidth, labelWidth, updatedWidth)
 		drawText(a.screen, 0, 2+i, style, truncate(line, w))
 	}
 }
@@ -886,6 +887,36 @@ func truncate(value string, width int) string {
 		return value[:width]
 	}
 	return value[:width-3] + "..."
+}
+
+func listColumnWidths(totalWidth int, items []store.DocumentSummary) (int, int, int) {
+	const (
+		columnGap        = 2
+		defaultIDWidth   = 36
+		minIDWidth       = 12
+		minLabelWidth    = 12
+		defaultTimeWidth = 20
+	)
+	updatedWidth := max(len("UPDATED"), defaultTimeWidth)
+	for _, item := range items {
+		updatedWidth = max(updatedWidth, len(item.UpdatedAt.Format(time.RFC3339)))
+	}
+	if totalWidth <= 0 {
+		return minIDWidth, minLabelWidth, updatedWidth
+	}
+	maxIDWidth := totalWidth - updatedWidth - columnGap*2 - minLabelWidth
+	idWidth := min(defaultIDWidth, max(minIDWidth, maxIDWidth))
+	labelWidth := max(minLabelWidth, totalWidth-idWidth-updatedWidth-columnGap*2)
+	return idWidth, labelWidth, updatedWidth
+}
+
+func formatListRow(id, label, updated string, idWidth, labelWidth, updatedWidth int) string {
+	return fmt.Sprintf(
+		"%-*s  %-*s  %-*s",
+		idWidth, truncate(id, idWidth),
+		labelWidth, truncate(label, labelWidth),
+		updatedWidth, truncate(updated, updatedWidth),
+	)
 }
 
 func clampInt(value, minValue, maxValue int) int {

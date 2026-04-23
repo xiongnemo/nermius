@@ -5,6 +5,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
 ## Current scope
 
 - Local-first vault lifecycle: `vault init|unlock|lock|change-password`
+- Build metadata reporting with `version`
 - Self-install command: `install [--dir PATH]`
 - CRUD for `host`, `group`, `profile`, `identity`, `key`, `forward`
 - Saved host key inspection with `known-host list|delete`
@@ -28,6 +29,8 @@ go test ./...
 go build ./...
 ```
 
+`nermius version` prints a build string in the form `v{major}.{minor}.{patch}-{branch}-{commit}[-dirty]`. The current base version is `v0.0.1`.
+
 ## Quick start
 
 ```powershell
@@ -50,6 +53,7 @@ nermius host add -it
 nermius host list
 nermius inspect my-host
 nermius known-host list
+nermius version
 
 # 5. Open a shell or run a one-shot remote command.
 nermius connect my-host
