@@ -8,7 +8,9 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -248,6 +250,119 @@ func TestCommandExitErrorExitCode(t *testing.T) {
 	}
 	if err.Error() != "" {
 		t.Fatalf("expected empty error message, got %q", err.Error())
+	}
+}
+
+func TestDetectTerminalSizeFromFDsPrefersFirstWorkingDescriptor(t *testing.T) {
+	getSize := func(fd int) (int, int, error) {
+		switch fd {
+		case 10:
+			return 0, 0, errors.New("not a tty")
+		case 11:
+			return 160, 48, nil
+		default:
+			return 200, 60, nil
+		}
+	}
+
+	cols, rows := detectTerminalSizeFromFDs([]int{10, 11, 12}, getSize, 120, 32)
+	if cols != 160 || rows != 48 {
+		t.Fatalf("expected first working size 160x48, got %dx%d", cols, rows)
+	}
+}
+
+func TestDetectTerminalSizeFromFDsFallsBackWhenAllDescriptorsFail(t *testing.T) {
+	getSize := func(fd int) (int, int, error) {
+		return 0, 0, errors.New("not a tty")
+	}
+
+	cols, rows := detectTerminalSizeFromFDs([]int{10, 11, 12}, getSize, 120, 32)
+	if cols != 120 || rows != 32 {
+		t.Fatalf("expected fallback size 120x32, got %dx%d", cols, rows)
+	}
+}
+
+func TestWatchTerminalResizeReportsChanges(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		mu     sync.Mutex
+		sizes  = [][2]int{{120, 32}, {120, 32}, {180, 52}, {180, 52}}
+		index  int
+		events [][2]int
+		done   = make(chan struct{})
+	)
+
+	currentSize := func() (int, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		size := sizes[index]
+		if index < len(sizes)-1 {
+			index++
+		}
+		return size[0], size[1]
+	}
+
+	go watchTerminalResize(ctx, 5*time.Millisecond, currentSize, func(cols, rows int) {
+		mu.Lock()
+		events = append(events, [2]int{cols, rows})
+		mu.Unlock()
+		close(done)
+		cancel()
+	})
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for resize event")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 resize event, got %d", len(events))
+	}
+	if events[0] != [2]int{180, 52} {
+		t.Fatalf("expected resize to 180x52, got %v", events[0])
+	}
+}
+
+func TestWatchTerminalResizeIgnoresZeroSizes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		mu     sync.Mutex
+		sizes  = [][2]int{{120, 32}, {0, 0}, {0, 40}, {120, 32}}
+		index  int
+		events int
+	)
+
+	currentSize := func() (int, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		size := sizes[index]
+		if index < len(sizes)-1 {
+			index++
+		}
+		return size[0], size[1]
+	}
+
+	go watchTerminalResize(ctx, 5*time.Millisecond, currentSize, func(cols, rows int) {
+		mu.Lock()
+		events++
+		mu.Unlock()
+	})
+
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+	time.Sleep(10 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if events != 0 {
+		t.Fatalf("expected zero resize events, got %d", events)
 	}
 }
 

@@ -94,13 +94,7 @@ func (c *Connector) ConnectInteractive(ctx context.Context, spec string, prompts
 	defer session.Close()
 
 	fd := int(os.Stdin.Fd())
-	width, height, _ := term.GetSize(fd)
-	if width == 0 {
-		width = 120
-	}
-	if height == 0 {
-		height = 32
-	}
+	width, height := consoleTerminalSize()
 	oldState, err := term.MakeRaw(fd)
 	if err == nil {
 		defer func() { _ = term.Restore(fd, oldState) }()
@@ -123,6 +117,11 @@ func (c *Connector) ConnectInteractive(ctx context.Context, spec string, prompts
 	go func() {
 		_, _ = io.Copy(stdin, os.Stdin)
 	}()
+	resizeCtx, cancelResize := context.WithCancel(ctx)
+	defer cancelResize()
+	go c.watchConsoleResize(resizeCtx, 250*time.Millisecond, func(cols, rows int) {
+		_ = session.WindowChange(rows, cols)
+	})
 	if err := session.Shell(); err != nil {
 		return err
 	}
@@ -934,6 +933,60 @@ func (c *Connector) logf(level int, format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "debug%d: %s\n", level, fmt.Sprintf(format, args...))
+}
+
+func consoleTerminalSize() (int, int) {
+	return detectTerminalSizeFromFDs(
+		[]int{int(os.Stdout.Fd()), int(os.Stderr.Fd()), int(os.Stdin.Fd())},
+		term.GetSize,
+		120,
+		32,
+	)
+}
+
+func detectTerminalSizeFromFDs(fds []int, getSize func(fd int) (width, height int, err error), fallbackWidth, fallbackHeight int) (int, int) {
+	for _, fd := range fds {
+		if fd < 0 {
+			continue
+		}
+		width, height, err := getSize(fd)
+		if err == nil && width > 0 && height > 0 {
+			return width, height
+		}
+	}
+	return fallbackWidth, fallbackHeight
+}
+
+func (c *Connector) watchConsoleResize(ctx context.Context, interval time.Duration, onResize func(cols, rows int)) {
+	if onResize == nil {
+		return
+	}
+	watchTerminalResize(ctx, interval, consoleTerminalSize, onResize)
+}
+
+func watchTerminalResize(ctx context.Context, interval time.Duration, currentSize func() (int, int), onResize func(cols, rows int)) {
+	if currentSize == nil || onResize == nil {
+		return
+	}
+	lastCols, lastRows := currentSize()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cols, rows := currentSize()
+			if cols <= 0 || rows <= 0 {
+				continue
+			}
+			if cols == lastCols && rows == lastRows {
+				continue
+			}
+			lastCols, lastRows = cols, rows
+			onResize(cols, rows)
+		}
+	}
 }
 
 func closeAll(closers []io.Closer) error {
