@@ -10,16 +10,19 @@ func TestResolveHostPrecedenceAndForwardMerging(t *testing.T) {
 	usernameBob := "bob"
 	usernameCarol := "carol"
 	identityRef := "identity-1"
+	hostKeyRef := "key-1"
 
 	resolved, err := ResolveHost(ResolveInputs{
 		Host: Host{
-			ID:          "host-1",
-			Title:       "prod",
-			Hostname:    "prod.example.com",
-			Port:        &port2200,
-			Username:    &usernameCarol,
-			IdentityRef: &identityRef,
-			ForwardIDs:  []string{"f-host"},
+			ID:               "host-1",
+			Title:            "prod",
+			Hostname:         "prod.example.com",
+			Port:             &port2200,
+			Username:         &usernameCarol,
+			IdentityRef:      &identityRef,
+			KeyRef:           &hostKeyRef,
+			PasswordSecretID: "host-password",
+			ForwardIDs:       []string{"f-host"},
 		},
 		Profiles: []Profile{
 			{
@@ -56,11 +59,53 @@ func TestResolveHostPrecedenceAndForwardMerging(t *testing.T) {
 	if resolved.KnownHosts.Backend != KnownHostsBackendVaultFile {
 		t.Fatalf("expected default known_hosts backend, got %q", resolved.KnownHosts.Backend)
 	}
+	if len(resolved.AuthMethods) != 3 {
+		t.Fatalf("expected 3 auth methods, got %d", len(resolved.AuthMethods))
+	}
+	if resolved.AuthMethods[0].Type != AuthMethodKey || resolved.AuthMethods[0].KeyID != "key-1" {
+		t.Fatalf("expected host key override first, got %+v", resolved.AuthMethods[0])
+	}
+	if resolved.AuthMethods[1].Type != AuthMethodPassword || resolved.AuthMethods[1].PasswordSecretID != "host-password" {
+		t.Fatalf("expected host password override second, got %+v", resolved.AuthMethods[1])
+	}
+	if resolved.AuthMethods[2].Type != AuthMethodPassword || resolved.AuthMethods[2].PasswordSecretID != "secret-1" {
+		t.Fatalf("expected identity auth last, got %+v", resolved.AuthMethods[2])
+	}
 	if len(resolved.Forwards) != 2 {
 		t.Fatalf("expected merged forwards, got %d", len(resolved.Forwards))
 	}
 	if resolved.Forwards[0].ID != "f-profile" || resolved.Forwards[1].ID != "f-host" {
 		t.Fatalf("unexpected forward order: %+v", resolved.Forwards)
+	}
+}
+
+func TestResolveHostIdentityUsernameOverridesProfileUsername(t *testing.T) {
+	usernameBob := "bob"
+
+	resolved, err := ResolveHost(ResolveInputs{
+		Host: Host{
+			ID:       "host-identity-wins",
+			Hostname: "prod.example.com",
+		},
+		Profiles: []Profile{
+			{
+				ID:       "profile-1",
+				Name:     "shared",
+				Username: &usernameBob,
+			},
+		},
+		Identity: &Identity{
+			ID:       "identity-1",
+			Name:     "primary",
+			Username: "alice",
+			Methods:  []AuthMethod{{Type: AuthMethodAgent}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveHost returned unexpected error: %v", err)
+	}
+	if resolved.Username != "alice" {
+		t.Fatalf("expected identity username override, got %q", resolved.Username)
 	}
 }
 

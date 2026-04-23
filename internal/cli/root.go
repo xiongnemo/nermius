@@ -361,6 +361,8 @@ func (r *runtime) newCreateCmd(kind domain.DocumentKind) *cobra.Command {
 		groupSpecs        []string
 		profileSpecs      []string
 		identitySpec      string
+		keySpec           string
+		password          string
 		forwardSpecs      []string
 		knownHostsPolicy  string
 		knownHostsBackend string
@@ -379,6 +381,7 @@ func (r *runtime) newCreateCmd(kind domain.DocumentKind) *cobra.Command {
 		Example: strings.TrimSpace(`
 nermius host add --hostname prod.example.com
 nermius host add --title prod --hostname prod.example.com --identity ops --profile default
+nermius host add --title prod --hostname prod.example.com --identity ops --key deploy-key
 nermius host add --title bastion --hostname bastion.example.com --jump corp-gateway --known-hosts accept-new
 		`),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -409,6 +412,44 @@ nermius host add --title bastion --hostname bastion.example.com --jump corp-gate
 				}
 				if strings.TrimSpace(username) != "" {
 					defaults.Username = stringPtr(strings.TrimSpace(username))
+				}
+				if len(groupSpecs) > 0 {
+					groupIDs, err := resolveSpecsToIDs(cmd.Context(), catalog, domain.KindGroup, groupSpecs)
+					if err != nil {
+						return err
+					}
+					defaults.GroupIDs = groupIDs
+				}
+				if len(profileSpecs) > 0 {
+					profileIDs, err := resolveSpecsToIDs(cmd.Context(), catalog, domain.KindProfile, profileSpecs)
+					if err != nil {
+						return err
+					}
+					defaults.ProfileIDs = profileIDs
+				}
+				if strings.TrimSpace(identitySpec) != "" {
+					identityID, err := catalog.ResolveDocumentID(cmd.Context(), domain.KindIdentity, identitySpec)
+					if err != nil {
+						return err
+					}
+					defaults.IdentityRef = &identityID
+				}
+				if strings.TrimSpace(keySpec) != "" {
+					keyID, err := catalog.ResolveDocumentID(cmd.Context(), domain.KindKey, keySpec)
+					if err != nil {
+						return err
+					}
+					defaults.KeyRef = &keyID
+				}
+				if strings.TrimSpace(password) != "" {
+					defaults.Password = password
+				}
+				if len(forwardSpecs) > 0 {
+					forwardIDs, err := resolveSpecsToIDs(cmd.Context(), catalog, domain.KindForward, forwardSpecs)
+					if err != nil {
+						return err
+					}
+					defaults.ForwardIDs = forwardIDs
 				}
 				knownHostsCfg, err := buildKnownHostsConfig(knownHostsPolicy, knownHostsBackend, knownHostsPath)
 				if err != nil {
@@ -484,6 +525,16 @@ nermius host add --title bastion --hostname bastion.example.com --jump corp-gate
 				}
 				host.IdentityRef = &identityID
 			}
+			if strings.TrimSpace(keySpec) != "" {
+				keyID, err := catalog.ResolveDocumentID(cmd.Context(), domain.KindKey, keySpec)
+				if err != nil {
+					return err
+				}
+				host.KeyRef = &keyID
+			}
+			if strings.TrimSpace(password) != "" {
+				host.Password = password
+			}
 			host.KnownHosts, err = buildKnownHostsConfig(knownHostsPolicy, knownHostsBackend, knownHostsPath)
 			if err != nil {
 				return err
@@ -530,6 +581,8 @@ nermius %s add -it
 	cmd.Flags().StringSliceVar(&groupSpecs, "group", nil, "Group name or ID to attach")
 	cmd.Flags().StringSliceVar(&profileSpecs, "profile", nil, "Profile name or ID to apply in order")
 	cmd.Flags().StringVar(&identitySpec, "identity", "", "Identity name or ID")
+	cmd.Flags().StringVar(&keySpec, "key", "", "Direct key override by name or ID")
+	cmd.Flags().StringVar(&password, "password", "", "Direct password override")
 	cmd.Flags().StringSliceVar(&forwardSpecs, "forward", nil, "Forward name or ID")
 	cmd.Flags().StringVar(&knownHostsPolicy, "known-hosts", "", "Known hosts policy: strict, accept-new, off")
 	cmd.Flags().StringVar(&knownHostsBackend, "known-hosts-backend", "", "Known hosts backend: vault, file, vault+file, file+vault")

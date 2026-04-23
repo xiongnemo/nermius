@@ -33,6 +33,9 @@ func (c *Catalog) SaveHost(ctx context.Context, host *domain.Host) error {
 	if strings.TrimSpace(host.Hostname) == "" {
 		return errors.New("hostname is required")
 	}
+	if err := c.normalizeHost(ctx, host); err != nil {
+		return err
+	}
 	if err := c.normalizeRoute(ctx, host.Route); err != nil {
 		return err
 	}
@@ -444,6 +447,19 @@ func (c *Catalog) normalizeIdentity(ctx context.Context, identity *domain.Identi
 			method.Password = ""
 		}
 	}
+	return nil
+}
+
+func (c *Catalog) normalizeHost(ctx context.Context, host *domain.Host) error {
+	if host == nil || host.Password == "" {
+		return nil
+	}
+	id, err := c.PutSecret(ctx, domain.SecretKindPassword, host.PasswordSecretID, []byte(host.Password))
+	if err != nil {
+		return err
+	}
+	host.PasswordSecretID = id
+	host.Password = ""
 	return nil
 }
 

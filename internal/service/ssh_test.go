@@ -192,6 +192,9 @@ func TestBuildClientConfigPrefersSavedHostKeyAlgorithms(t *testing.T) {
 				{Type: domain.AuthMethodPassword, Password: "secret"},
 			},
 		},
+		AuthMethods: []domain.AuthMethod{
+			{Type: domain.AuthMethodPassword, Password: "secret"},
+		},
 		KnownHosts: domain.KnownHostsConfig{
 			Policy:  domain.KnownHostsStrict,
 			Backend: domain.KnownHostsBackendFile,
@@ -250,6 +253,24 @@ func TestCommandExitErrorExitCode(t *testing.T) {
 	}
 	if err.Error() != "" {
 		t.Fatalf("expected empty error message, got %q", err.Error())
+	}
+}
+
+func TestPrepareResolvedAddsRuntimePasswordFallbackWithoutIdentity(t *testing.T) {
+	connector := NewConnector(nil, "")
+	resolved, err := connector.prepareResolved(context.Background(), domain.ResolvedConfig{
+		Hostname: "example.com",
+		Port:     22,
+		Username: "alice",
+	}, Prompts{})
+	if err != nil {
+		t.Fatalf("prepareResolved returned error: %v", err)
+	}
+	if len(resolved.AuthMethods) != 1 {
+		t.Fatalf("expected one runtime auth method, got %d", len(resolved.AuthMethods))
+	}
+	if resolved.AuthMethods[0].Type != domain.AuthMethodPassword {
+		t.Fatalf("expected runtime password fallback, got %+v", resolved.AuthMethods[0])
 	}
 }
 

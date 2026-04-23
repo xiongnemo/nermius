@@ -71,19 +71,22 @@ const (
 )
 
 type Host struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title,omitempty"`
-	Hostname    string            `json:"hostname"`
-	Port        *int              `json:"port,omitempty"`
-	Username    *string           `json:"username,omitempty"`
-	GroupIDs    []string          `json:"group_ids,omitempty"`
-	ProfileIDs  []string          `json:"profile_ids,omitempty"`
-	IdentityRef *string           `json:"identity_ref,omitempty"`
-	Route       *Route            `json:"route,omitempty"`
-	KnownHosts  *KnownHostsConfig `json:"known_hosts,omitempty"`
-	ForwardIDs  []string          `json:"forward_ids,omitempty"`
-	CreatedAt   time.Time         `json:"created_at,omitempty"`
-	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
+	ID               string            `json:"id"`
+	Title            string            `json:"title,omitempty"`
+	Hostname         string            `json:"hostname"`
+	Port             *int              `json:"port,omitempty"`
+	Username         *string           `json:"username,omitempty"`
+	GroupIDs         []string          `json:"group_ids,omitempty"`
+	ProfileIDs       []string          `json:"profile_ids,omitempty"`
+	IdentityRef      *string           `json:"identity_ref,omitempty"`
+	KeyRef           *string           `json:"key_ref,omitempty"`
+	Password         string            `json:"password,omitempty"`
+	PasswordSecretID string            `json:"password_secret_id,omitempty"`
+	Route            *Route            `json:"route,omitempty"`
+	KnownHosts       *KnownHostsConfig `json:"known_hosts,omitempty"`
+	ForwardIDs       []string          `json:"forward_ids,omitempty"`
+	CreatedAt        time.Time         `json:"created_at,omitempty"`
+	UpdatedAt        time.Time         `json:"updated_at,omitempty"`
 }
 
 type Group struct {

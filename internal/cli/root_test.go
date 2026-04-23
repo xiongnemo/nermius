@@ -2,9 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"testing"
 
+	"github.com/nermius/nermius/internal/config"
 	"github.com/nermius/nermius/internal/domain"
+	"github.com/nermius/nermius/internal/service"
 )
 
 func TestParseCLIForwardLocal(t *testing.T) {
@@ -92,5 +96,78 @@ func TestVersionCommandPrintsVersionString(t *testing.T) {
 	}
 	if len(bytes.TrimSpace(out.Bytes())) == 0 {
 		t.Fatal("expected version command output")
+	}
+}
+
+func TestHostAddHelpIncludesDirectAuthFlags(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"host", "add", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(host add --help) returned error: %v", err)
+	}
+	help := out.String()
+	if !bytes.Contains([]byte(help), []byte("--key")) {
+		t.Fatalf("expected host add help to include --key, got:\n%s", help)
+	}
+	if !bytes.Contains([]byte(help), []byte("--password")) {
+		t.Fatalf("expected host add help to include --password, got:\n%s", help)
+	}
+}
+
+func TestResolveSpecsToIDsSupportsKeyNameAndShortID(t *testing.T) {
+	catalog, cleanup := newCLITestCatalog(t)
+	defer cleanup()
+
+	key := &domain.Key{
+		Name:               "deploy",
+		Kind:               domain.KeyKindPrivateKey,
+		PrivateKeySecretID: "secret-id",
+	}
+	if err := catalog.SaveKey(context.Background(), key); err != nil {
+		t.Fatalf("SaveKey failed: %v", err)
+	}
+
+	ids, err := resolveSpecsToIDs(context.Background(), catalog, domain.KindKey, []string{"deploy", key.ID[:8], key.ID})
+	if err != nil {
+		t.Fatalf("resolveSpecsToIDs returned error: %v", err)
+	}
+	if len(ids) != 3 || ids[0] != key.ID || ids[1] != key.ID || ids[2] != key.ID {
+		t.Fatalf("unexpected resolved ids: %v", ids)
+	}
+}
+
+func TestCompletionSuggestsHostDirectKeyFlag(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "host", "add", "--k"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete host add --k) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("--key")) {
+		t.Fatalf("expected completion to suggest --key, got:\n%s", out.String())
+	}
+}
+
+func newCLITestCatalog(t *testing.T) (*service.Catalog, func()) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "vault.db")
+	manager := service.NewVaultManager(config.Paths{
+		ConfigDir:      filepath.Dir(path),
+		CacheDir:       filepath.Dir(path),
+		VaultPath:      path,
+		SessionPath:    filepath.Join(filepath.Dir(path), "session.json"),
+		KnownHostsPath: filepath.Join(filepath.Dir(path), "known_hosts"),
+	})
+	db, err := manager.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	return service.NewCatalog(db, []byte("01234567890123456789012345678901")), func() {
+		_ = db.Close()
 	}
 }

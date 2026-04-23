@@ -11,6 +11,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
 - Saved host key inspection with `known-host list|delete`
 - Resolved host inspection with `inspect <host>`
 - OpenSSH import via `import openssh --config ~/.ssh/config`
+- Host-level direct key/password auth overrides
 - SSH connect flow with:
   - password, private key, and ssh-agent auth
   - built-in known-host storage in the vault by default, with optional file fallback
@@ -48,6 +49,7 @@ nermius import openssh --config ~/.ssh/config
 nermius key add -it
 nermius identity add -it
 nermius host add -it
+nermius host add --title prod --hostname prod.example.com --identity ops --key deploy-key
 
 # 4. Inspect the resolved host config before connecting.
 nermius host list
@@ -97,6 +99,16 @@ nermius host add --title prod --hostname prod.example.com --identity ops --known
 
 # Read from the vault first, then fall back to ~/.ssh/known_hosts.
 nermius host add --title prod --hostname prod.example.com --identity ops --known-hosts strict --known-hosts-backend vault+file
+```
+
+Hosts can also override the selected identity's auth methods directly:
+
+```powershell
+# Reuse the identity username, but force this host to try a specific key first.
+nermius host add --title prod --hostname prod.example.com --identity ops --key deploy-key
+
+# Attach a host-specific password override.
+nermius host add --title breakglass --hostname prod.example.com --identity ops --password super-secret
 ```
 
 ## Install
@@ -169,6 +181,8 @@ Host:
   "hostname": "prod.example.com",
   "profile_ids": ["profile-uuid"],
   "identity_ref": "identity-uuid",
+  "key_ref": "key-uuid",
+  "password": "super-secret",
   "forward_ids": ["forward-uuid"]
 }
 ```

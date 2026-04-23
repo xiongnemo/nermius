@@ -142,6 +142,10 @@ func promptCSV(label string, defaults []string) ([]string, error) {
 }
 
 func promptSecretInteractive(label string, required bool) (string, error) {
+	return promptSecretInteractiveWithDefault(label, "", required)
+}
+
+func promptSecretInteractiveWithDefault(label, defaultValue string, required bool) (string, error) {
 	for {
 		fmt.Fprintf(os.Stderr, "%s: ", label)
 		value, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -150,6 +154,9 @@ func promptSecretInteractive(label string, required bool) (string, error) {
 			return "", err
 		}
 		trimmed := strings.TrimSpace(string(value))
+		if trimmed == "" && defaultValue != "" {
+			return defaultValue, nil
+		}
 		if trimmed == "" && required {
 			fmt.Fprintln(os.Stderr, "This value is required.")
 			continue
@@ -298,6 +305,25 @@ func promptHostInteractive(ctx context.Context, catalog *service.Catalog, defaul
 			return out, err
 		}
 		out.IdentityRef = &id
+	}
+	keyDefault := derefString(defaults.KeyRef)
+	keySpec, err := promptLine("Direct key override (name/ID, overrides identity/profile auth)", keyDefault, false)
+	if err != nil {
+		return out, err
+	}
+	if keySpec != "" {
+		id, err := catalog.ResolveDocumentID(ctx, domain.KindKey, keySpec)
+		if err != nil {
+			return out, err
+		}
+		out.KeyRef = &id
+	}
+	password, err := promptSecretInteractiveWithDefault("Direct password override (blank to inherit identity/profile auth)", defaults.Password, false)
+	if err != nil {
+		return out, err
+	}
+	if password != "" {
+		out.Password = password
 	}
 	forwardSpecs, err := promptCSV("Forwards (comma-separated names/IDs)", defaults.ForwardIDs)
 	if err != nil {

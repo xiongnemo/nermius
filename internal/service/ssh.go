@@ -318,19 +318,11 @@ func (c *Connector) prepareResolved(ctx context.Context, resolved domain.Resolve
 		}
 		resolved.Username = value
 	}
-	if resolved.Identity == nil {
-		resolved.Identity = &domain.Identity{
-			Name:     "runtime",
-			Username: resolved.Username,
-			Methods:  []domain.AuthMethod{{Type: domain.AuthMethodPassword}},
-		}
-		resolved.IdentityRef = ""
-	}
-	if resolved.Identity.Username == "" {
+	if resolved.Identity != nil && resolved.Identity.Username == "" {
 		resolved.Identity.Username = resolved.Username
 	}
-	if len(resolved.Identity.Methods) == 0 {
-		resolved.Identity.Methods = []domain.AuthMethod{{Type: domain.AuthMethodPassword}}
+	if len(resolved.AuthMethods) == 0 {
+		resolved.AuthMethods = []domain.AuthMethod{{Type: domain.AuthMethodPassword}}
 	}
 	return resolved, nil
 }
@@ -450,11 +442,8 @@ func (c *Connector) buildClientConfig(ctx context.Context, resolved domain.Resol
 }
 
 func (c *Connector) buildAuthMethods(ctx context.Context, resolved domain.ResolvedConfig, prompts Prompts) ([]ssh.AuthMethod, error) {
-	if resolved.Identity == nil {
-		return nil, errors.New("no identity available")
-	}
-	auths := make([]ssh.AuthMethod, 0, len(resolved.Identity.Methods))
-	for _, method := range resolved.Identity.Methods {
+	auths := make([]ssh.AuthMethod, 0, len(resolved.AuthMethods))
+	for _, method := range resolved.AuthMethods {
 		switch method.Type {
 		case domain.AuthMethodPassword:
 			password := method.Password
