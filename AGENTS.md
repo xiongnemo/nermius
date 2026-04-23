@@ -6,3 +6,4 @@ This repository uses the following working rules:
 2. After updating any command or subcommand, check whether the corresponding documentation in `README.md` also needs to be updated.
 3. After updating any command or subcommand, also check the autocompletion implementation for regressions.
    If there is no dedicated completion source file, inspect the Cobra-generated `completion` subcommand wiring and behavior instead.
+4. After finishing a single feature or fixing a bug, create a commit for that unit of work.
