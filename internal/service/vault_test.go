@@ -56,6 +56,9 @@ func TestVaultStatusAndResolveKeychain(t *testing.T) {
 	if !status.Initialized || !status.KeychainEnabled {
 		t.Fatalf("unexpected status: %+v", status)
 	}
+	if status.PresenceBackendKind != "fake-presence" || !status.UserPresenceCapable {
+		t.Fatalf("unexpected presence status: %+v", status)
+	}
 	if status.SchemaVersion != store.CurrentSchemaVersion {
 		t.Fatalf("expected schema %s, got %s", store.CurrentSchemaVersion, status.SchemaVersion)
 	}

@@ -169,6 +169,8 @@ Behavior notes:
 
 - `vault keychain enable` stores the raw vault unlock material in the platform backend when supported.
 - normal commands auto-try the enrolled keychain backend first, then fall back to the master password.
+- `vault keychain status` reports both the unlock-material backend and the user-presence backend.
+- on Windows, unlock material is DPAPI-protected, while read/write authorization uses Windows Hello when available, then the Windows credential prompt, then the master password fallback.
 - current-schema vaults use whole-vault encrypted records, so hostnames, usernames, labels, known-host payloads, and secrets are no longer stored as plaintext rows in SQLite.
 - `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault.
 

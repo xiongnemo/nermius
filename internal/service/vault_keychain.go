@@ -35,6 +35,7 @@ type VaultStatus struct {
 	Initialized          bool   `json:"initialized"`
 	KeychainEnabled      bool   `json:"keychain_enabled"`
 	BackendKind          string `json:"backend_kind,omitempty"`
+	PresenceBackendKind  string `json:"presence_backend,omitempty"`
 	UserPresenceCapable  bool   `json:"user_presence_capable"`
 	CurrentVaultID       string `json:"vault_id,omitempty"`
 	SchemaVersion        string `json:"schema_version,omitempty"`

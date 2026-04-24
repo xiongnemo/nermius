@@ -146,10 +146,12 @@ func (m *VaultManager) Status(ctx context.Context) (VaultStatus, error) {
 	}
 	storeBackend := newUnlockMaterialStore(m.Paths)
 	presence := newPresenceAuthorizer(m.Paths)
+	presenceAvailable, _ := presence.Available(ctx)
 	status := VaultStatus{
 		Initialized:         initialized,
 		BackendKind:         storeBackend.Kind(),
-		UserPresenceCapable: presence.UserPresence(),
+		PresenceBackendKind: presence.Kind(),
+		UserPresenceCapable: presenceAvailable && presence.UserPresence(),
 	}
 	if !initialized {
 		return status, nil
@@ -352,11 +354,11 @@ func (m *VaultManager) MigrateVault(ctx context.Context, prompt PasswordPrompter
 }
 
 func (m *VaultManager) resolveKeyWithStore(ctx context.Context, db *store.Store, prompt PasswordPrompter, intent vaultAccessIntent) ([]byte, error) {
-	if raw, ok := os.LookupEnv("NERMIUS_MASTER_PASSWORD"); ok && raw != "" {
-		return m.unwrapVaultKey(ctx, db, raw)
-	}
 	if key, err := m.resolveFromKeychain(ctx, db, intent); err == nil {
 		return key, nil
+	}
+	if raw, ok := os.LookupEnv("NERMIUS_MASTER_PASSWORD"); ok && raw != "" {
+		return m.unwrapVaultKey(ctx, db, raw)
 	}
 	return m.resolvePasswordPromptOnly(ctx, db, prompt)
 }
