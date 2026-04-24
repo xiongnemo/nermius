@@ -218,6 +218,42 @@ func ListKnownHostsEntries(ctx context.Context, catalog *Catalog, filePath, sour
 	return out, nil
 }
 
+func LoadKnownHostEntry(ctx context.Context, catalog *Catalog, filePath, id string) (*domain.KnownHost, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("known host id is required")
+	}
+	if strings.HasPrefix(id, "file:") {
+		items, err := ListKnownHostsEntries(ctx, catalog, filePath, "file")
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if item.ID == id {
+				entry := item
+				return &entry, nil
+			}
+		}
+		return nil, os.ErrNotExist
+	}
+	return catalog.GetKnownHost(ctx, id)
+}
+
+func SaveKnownHostEntry(ctx context.Context, catalog *Catalog, filePath string, entry *domain.KnownHost) error {
+	if entry == nil {
+		return errors.New("known host entry is required")
+	}
+	switch strings.ToLower(strings.TrimSpace(entry.Source)) {
+	case "", string(domain.KnownHostsBackendVault):
+		entry.Source = string(domain.KnownHostsBackendVault)
+		return catalog.SaveKnownHost(ctx, entry)
+	case string(domain.KnownHostsBackendFile):
+		return saveKnownHostFileEntry(ctx, catalog, filePath, entry)
+	default:
+		return errors.New("known host source must be one of: vault, file")
+	}
+}
+
 func DeleteKnownHostsEntries(ctx context.Context, catalog *Catalog, filePath, spec, source string) (int, error) {
 	source = strings.ToLower(strings.TrimSpace(source))
 	if source == "" {
@@ -271,6 +307,76 @@ func DeleteKnownHostsEntries(ctx context.Context, catalog *Catalog, filePath, sp
 		return deleted, errors.New("known host source must be one of: all, vault, file")
 	}
 	return deleted, nil
+}
+
+func saveKnownHostFileEntry(ctx context.Context, catalog *Catalog, filePath string, entry *domain.KnownHost) error {
+	if entry == nil {
+		return errors.New("known host entry is required")
+	}
+	if len(entry.Hosts) == 0 {
+		return errors.New("known host requires at least one host pattern")
+	}
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(entry.PublicKey)))
+	if err != nil {
+		return err
+	}
+	entry.Algorithm = key.Type()
+	entry.PublicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+	entry.FingerprintSHA256 = ssh.FingerprintSHA256(key)
+	entry.Source = string(domain.KnownHostsBackendFile)
+
+	if err := ensureKnownHostsFile(filePath); err != nil {
+		return err
+	}
+	parsed, err := parseKnownHostsFile(filePath)
+	if err != nil {
+		return err
+	}
+	line := knownhosts.Line(entry.Hosts, key)
+	filtered := make([]string, 0, len(parsed)+1)
+	replaced := false
+	for _, existing := range parsed {
+		if existing.Entry != nil && existing.Entry.ID == entry.ID && strings.HasPrefix(entry.ID, "file:") {
+			filtered = append(filtered, line)
+			replaced = true
+			continue
+		}
+		filtered = append(filtered, existing.RawLine)
+	}
+	if !replaced {
+		filtered = append(filtered, line)
+	}
+	body := ""
+	if len(filtered) > 0 {
+		body = strings.Join(filtered, "\n") + "\n"
+	}
+	if err := os.WriteFile(filePath, []byte(body), 0o600); err != nil {
+		return err
+	}
+	if replaced || !strings.HasPrefix(entry.ID, "file:") {
+		items, err := ListKnownHostsEntries(ctx, catalog, filePath, "file")
+		if err == nil {
+			for _, item := range items {
+				if equalKnownHostTokenSlice(item.Hosts, entry.Hosts) && item.Algorithm == entry.Algorithm && item.PublicKey == entry.PublicKey {
+					entry.ID = item.ID
+					break
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func equalKnownHostTokenSlice(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !equalKnownHostToken(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseKnownHostsFile(path string) ([]parsedKnownHostLine, error) {

@@ -749,7 +749,7 @@ func (r *runtime) newTUICmd() *cobra.Command {
 			defer db.Close()
 			connector := service.NewConnector(catalog, paths.KnownHostsPath)
 			connector.Verbosity = r.verbose
-			return tui.Run(cmd.Context(), catalog, connector)
+			return tui.Run(cmd.Context(), catalog, connector, paths)
 		},
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/nermius/nermius/internal/clipboard"
+	"github.com/nermius/nermius/internal/config"
 	"github.com/nermius/nermius/internal/domain"
 	"github.com/nermius/nermius/internal/service"
 	"github.com/nermius/nermius/internal/store"
@@ -25,11 +26,13 @@ type App struct {
 	connector *service.Connector
 	screen    tcell.Screen
 	clipboard clipboard.Adapter
+	paths     config.Paths
 
 	tabs             []domain.DocumentKind
 	activeTab        int
 	cursor           int
 	records          map[domain.DocumentKind][]store.DocumentSummary
+	filters          map[domain.DocumentKind]string
 	sessions         []*service.EmbeddedSession
 	activeSession    int
 	status           string
@@ -44,9 +47,10 @@ type App struct {
 	focused          bool
 	selection        sessionSelection
 	scrollOffsets    map[*service.EmbeddedSession]int
+	modals           []modalState
 }
 
-func Run(ctx context.Context, catalog *service.Catalog, connector *service.Connector) error {
+func Run(ctx context.Context, catalog *service.Catalog, connector *service.Connector, paths config.Paths) error {
 	screen, err := tcell.NewScreen()
 	if err != nil {
 		return err
@@ -62,15 +66,19 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 		connector: connector,
 		screen:    screen,
 		clipboard: clipboard.New(),
+		paths:     paths,
 		tabs: []domain.DocumentKind{
 			domain.KindHost,
 			domain.KindGroup,
 			domain.KindProfile,
 			domain.KindIdentity,
+			domain.KindKey,
 			domain.KindForward,
+			domain.KindKnownHost,
 		},
 		records:        map[domain.DocumentKind][]store.DocumentSummary{},
-		status:         "click tabs/select | wheel scrollback | drag select | Shift forces local mouse | Ctrl+Shift+C/V copy/paste | F2 back | F6 next | F8 close | F10 quit",
+		filters:        map[domain.DocumentKind]string{},
+		status:         "a add | d detail | e edit | Del/x delete | / filter | Enter host connect | F2 back | F6 next | F8 close | F10 quit",
 		cursorBlinkOn:  true,
 		cursorBlinkAt:  time.Now().Add(500 * time.Millisecond),
 		lastMouseX:     -1,
@@ -117,10 +125,22 @@ func (a *App) loop(ctx context.Context) error {
 			case *tcell.EventFocus:
 				a.setFocused(event.Focused)
 			case *tcell.EventKey:
+				if a.hasModal() {
+					if done, err := a.handleModalKey(ctx, event); done {
+						return err
+					}
+					continue
+				}
 				if done, err := a.handleKey(ctx, event); done {
 					return err
 				}
 			case *tcell.EventMouse:
+				if a.hasModal() {
+					if done, err := a.handleModalMouse(ctx, event); done {
+						return err
+					}
+					continue
+				}
 				if done, err := a.handleMouse(ctx, event); done {
 					return err
 				}
@@ -196,14 +216,43 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			if err := a.openSelectedHostSession(ctx); err != nil {
 				a.status = err.Error()
 			}
+		} else if err := a.openDetailModal(ctx); err != nil {
+			a.status = err.Error()
 		}
 	case tcell.KeyCtrlR:
 		if err := a.reload(ctx); err != nil {
 			a.status = err.Error()
 		}
+	case tcell.KeyDelete:
+		if err := a.openDeleteConfirm(ctx); err != nil {
+			a.status = err.Error()
+		}
 	default:
-		if ev.Rune() == 'q' {
+		switch ev.Rune() {
+		case 'q':
 			return true, nil
+		case 'a':
+			if err := a.openAddForm(ctx); err != nil {
+				a.status = err.Error()
+			}
+		case 'd':
+			if err := a.openDetailModal(ctx); err != nil {
+				a.status = err.Error()
+			}
+		case 'e':
+			if err := a.openEditForm(ctx); err != nil {
+				a.status = err.Error()
+			}
+		case 'r':
+			if err := a.reload(ctx); err != nil {
+				a.status = err.Error()
+			}
+		case '/':
+			a.openFilterModal()
+		case 'x':
+			if err := a.openDeleteConfirm(ctx); err != nil {
+				a.status = err.Error()
+			}
 		}
 	}
 	return false, nil
@@ -255,11 +304,16 @@ func (a *App) handleMouse(ctx context.Context, ev *tcell.EventMouse) (bool, erro
 
 func (a *App) reload(ctx context.Context) error {
 	for _, kind := range a.tabs {
-		items, err := a.catalog.List(ctx, kind)
+		items, err := a.listRecords(ctx, kind)
 		if err != nil {
 			return err
 		}
 		a.records[kind] = items
+	}
+	if current := a.currentRecords(); len(current) == 0 {
+		a.cursor = 0
+	} else if a.cursor >= len(current) {
+		a.cursor = len(current) - 1
 	}
 	return nil
 }
@@ -327,6 +381,9 @@ func (a *App) render() {
 		}
 	}
 	drawText(a.screen, 0, h-1, tcell.StyleDefault.Foreground(tcell.ColorGray), truncate(status, w))
+	if a.hasModal() {
+		a.renderModal()
+	}
 	a.screen.Show()
 }
 
@@ -471,7 +528,7 @@ func (a *App) currentSession() *service.EmbeddedSession {
 }
 
 func (a *App) currentRecords() []store.DocumentSummary {
-	return a.records[a.currentKind()]
+	return filterSummaries(a.records[a.currentKind()], a.filters[a.currentKind()])
 }
 
 func (a *App) selectedRecord() store.DocumentSummary {

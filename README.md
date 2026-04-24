@@ -20,7 +20,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
   - saved and one-shot `-L/-R/-D` forwards
   - SSH-style debug verbosity via `-v`, `-vv`, `-vvv`
   - remote command execution via `exec <host> <command>`
-- TUI management tabs plus embedded SSH session tabs
+- TUI CRUD tabs for `host`, `group`, `profile`, `identity`, `key`, `forward`, `known-host`, plus embedded SSH session tabs
 
 ## Build
 
@@ -67,6 +67,15 @@ nermius tui
 ```
 
 `import openssh` and the interactive `add -it` flow are alternative ways to populate the vault. Use whichever matches your setup.
+
+Inside the TUI object tabs:
+
+- `HOST / GROUP / PROFILE / IDENTITY / KEY / FORWARD / KNOWN-HOST` all support in-screen CRUD modals
+- `Enter` connects on `HOST`, but opens a read-only detail view on every other tab
+- `d` opens detail, `e` opens edit, `a` opens a create form
+- `Delete` or `x` opens delete confirmation; referenced objects are blocked and show who still depends on them
+- `/` opens a filter prompt for the current tab, and `r` reloads the lists
+- reference fields use searchable pickers, and ordered lists such as profiles, forwards, known-host host patterns, and identity auth methods use a dedicated list editor
 
 Inside the TUI session view:
 

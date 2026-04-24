@@ -25,6 +25,13 @@ type Catalog struct {
 
 var ErrAmbiguousReference = errors.New("reference is ambiguous")
 
+type DocumentReference struct {
+	Kind  domain.DocumentKind `json:"kind"`
+	ID    string              `json:"id"`
+	Label string              `json:"label"`
+	Field string              `json:"field"`
+}
+
 func NewCatalog(st *store.Store, masterKey []byte) *Catalog {
 	return &Catalog{store: st, masterKey: masterKey}
 }
@@ -114,9 +121,15 @@ func (c *Catalog) SaveKnownHost(ctx context.Context, knownHost *domain.KnownHost
 	if len(knownHost.Hosts) == 0 {
 		return errors.New("known host requires at least one host pattern")
 	}
-	if strings.TrimSpace(knownHost.Algorithm) == "" || strings.TrimSpace(knownHost.PublicKey) == "" {
-		return errors.New("known host requires both algorithm and public_key")
+	if strings.TrimSpace(knownHost.PublicKey) == "" {
+		return errors.New("known host requires public_key")
 	}
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(knownHost.PublicKey)))
+	if err != nil {
+		return err
+	}
+	knownHost.Algorithm = key.Type()
+	knownHost.PublicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 	label := knownHostDocumentLabel(knownHost.Hosts, knownHost.Algorithm)
 	if existing, err := c.store.FindDocumentByLabel(ctx, string(domain.KindKnownHost), label); err == nil {
 		knownHost.ID = existing.ID
@@ -139,6 +152,14 @@ func (c *Catalog) SaveKnownHost(ctx context.Context, knownHost *domain.KnownHost
 func (c *Catalog) GetHost(ctx context.Context, id string) (*domain.Host, error) {
 	var out domain.Host
 	if err := c.loadEntity(ctx, id, domain.KindHost, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Catalog) GetGroup(ctx context.Context, id string) (*domain.Group, error) {
+	var out domain.Group
+	if err := c.loadEntity(ctx, id, domain.KindGroup, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -186,6 +207,91 @@ func (c *Catalog) GetKnownHost(ctx context.Context, id string) (*domain.KnownHos
 
 func (c *Catalog) Delete(ctx context.Context, id string) error {
 	return c.store.DeleteDocument(ctx, id)
+}
+
+func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]DocumentReference, error) {
+	targetID = strings.TrimSpace(targetID)
+	if targetID == "" {
+		return nil, errors.New("target id is required")
+	}
+	refs := []DocumentReference{}
+
+	hosts, err := c.listHosts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, host := range hosts {
+		for _, id := range host.GroupIDs {
+			if id == targetID {
+				refs = append(refs, DocumentReference{Kind: domain.KindHost, ID: host.ID, Label: host.Label(), Field: "group_ids"})
+			}
+		}
+		for _, id := range host.ProfileIDs {
+			if id == targetID {
+				refs = append(refs, DocumentReference{Kind: domain.KindHost, ID: host.ID, Label: host.Label(), Field: "profile_ids"})
+			}
+		}
+		if host.IdentityRef != nil && *host.IdentityRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindHost, ID: host.ID, Label: host.Label(), Field: "identity_ref"})
+		}
+		if host.KeyRef != nil && *host.KeyRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindHost, ID: host.ID, Label: host.Label(), Field: "key_ref"})
+		}
+		for _, id := range host.ForwardIDs {
+			if id == targetID {
+				refs = append(refs, DocumentReference{Kind: domain.KindHost, ID: host.ID, Label: host.Label(), Field: "forward_ids"})
+			}
+		}
+	}
+
+	profileRecs, err := c.store.AllDocuments(ctx, string(domain.KindProfile))
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range profileRecs {
+		var profile domain.Profile
+		if err := json.Unmarshal(rec.Body, &profile); err != nil {
+			return nil, err
+		}
+		if profile.IdentityRef != nil && *profile.IdentityRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindProfile, ID: profile.ID, Label: profile.Label(), Field: "identity_ref"})
+		}
+		for _, id := range profile.ForwardIDs {
+			if id == targetID {
+				refs = append(refs, DocumentReference{Kind: domain.KindProfile, ID: profile.ID, Label: profile.Label(), Field: "forward_ids"})
+			}
+		}
+	}
+
+	identityRecs, err := c.store.AllDocuments(ctx, string(domain.KindIdentity))
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range identityRecs {
+		var identity domain.Identity
+		if err := json.Unmarshal(rec.Body, &identity); err != nil {
+			return nil, err
+		}
+		for _, method := range identity.Methods {
+			if method.Type == domain.AuthMethodKey && method.KeyID == targetID {
+				refs = append(refs, DocumentReference{Kind: domain.KindIdentity, ID: identity.ID, Label: identity.Label(), Field: "methods.key_id"})
+			}
+		}
+	}
+
+	slices.SortFunc(refs, func(left, right DocumentReference) int {
+		if left.Kind != right.Kind {
+			return strings.Compare(string(left.Kind), string(right.Kind))
+		}
+		if !strings.EqualFold(left.Label, right.Label) {
+			return strings.Compare(strings.ToLower(left.Label), strings.ToLower(right.Label))
+		}
+		if left.Field != right.Field {
+			return strings.Compare(left.Field, right.Field)
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+	return refs, nil
 }
 
 func (c *Catalog) List(ctx context.Context, kind domain.DocumentKind) ([]store.DocumentSummary, error) {
