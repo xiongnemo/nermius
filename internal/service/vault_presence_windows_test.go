@@ -27,11 +27,26 @@ func TestWindowsPresenceSelectsHelloWhenUsable(t *testing.T) {
 	}
 }
 
+func TestWindowsPresenceSelectsHelloOnWindows10WhenUsable(t *testing.T) {
+	restore := installWindowsPresenceFakes(t, windowsPresenceFakeConfig{
+		build:       windowsHelloMinBuild - 1,
+		hwnd:        0,
+		helloUsable: true,
+		credUsable:  true,
+	})
+	defer restore()
+
+	authorizer := &windowsPromptAuthorizer{}
+	if got := authorizer.Kind(); got != windowsPresenceHello {
+		t.Fatalf("expected %s, got %s", windowsPresenceHello, got)
+	}
+}
+
 func TestWindowsPresenceFallsBackToCredUI(t *testing.T) {
 	restore := installWindowsPresenceFakes(t, windowsPresenceFakeConfig{
 		build:       windowsHelloMinBuild - 1,
 		hwnd:        100,
-		helloUsable: true,
+		helloUsable: false,
 		credUsable:  true,
 	})
 	defer restore()
@@ -74,7 +89,7 @@ func TestWindowsPresenceUnavailable(t *testing.T) {
 	restore := installWindowsPresenceFakes(t, windowsPresenceFakeConfig{
 		build:       windowsHelloMinBuild,
 		hwnd:        0,
-		helloUsable: true,
+		helloUsable: false,
 		credUsable:  false,
 	})
 	defer restore()

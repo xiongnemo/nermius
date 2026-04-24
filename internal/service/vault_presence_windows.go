@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -23,7 +22,6 @@ const (
 	windowsHelloMinBuild = 22000
 
 	credUIWinEnumerateCurrentUser = 0x00000200
-	credUIWinSecurePrompt         = 0x00001000
 
 	errorCancelled           = 1223
 	securityLogonInteractive = 2
@@ -33,9 +31,13 @@ const (
 	hresultPointer              = 0x80004003
 	hresultNoInterface          = 0x80004002
 	hresultRPCModeChanged       = 0x80010106
+	asyncStatusStarted    int32 = 0
 	asyncStatusCompleted  int32 = 1
+	asyncStatusCanceled   int32 = 2
+	asyncStatusError      int32 = 3
 
-	userConsentVerified = 0
+	userConsentVerifierAvailable = 0
+	userConsentVerified          = 0
 )
 
 var (
@@ -108,30 +110,15 @@ type lsaQuotaLimits struct {
 	timeLimit             int64
 }
 
-type winAsyncHandler struct {
-	vtbl *winAsyncHandlerVtbl
-	refs int32
-	iid  windows.GUID
-	done chan int32
-}
-
-type winAsyncHandlerVtbl struct {
-	queryInterface uintptr
-	addRef         uintptr
-	release        uintptr
-	invoke         uintptr
-}
-
-var winAsyncHandlerTable = winAsyncHandlerVtbl{
-	queryInterface: syscall.NewCallback(winAsyncHandlerQueryInterface),
-	addRef:         syscall.NewCallback(winAsyncHandlerAddRef),
-	release:        syscall.NewCallback(winAsyncHandlerRelease),
-	invoke:         syscall.NewCallback(winAsyncHandlerInvoke),
-}
-
 var (
-	iidIUnknown = windows.GUID{
-		Data1: 0x00000000,
+	iidUserConsentVerifierStatics = windows.GUID{
+		Data1: 0xaf4f3f91,
+		Data2: 0x564c,
+		Data3: 0x4ddc,
+		Data4: [8]byte{0xb8, 0xb5, 0x97, 0x34, 0x47, 0x62, 0x7c, 0x65},
+	}
+	iidAsyncInfo = windows.GUID{
+		Data1: 0x00000036,
 		Data2: 0x0000,
 		Data3: 0x0000,
 		Data4: [8]byte{0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46},
@@ -142,17 +129,17 @@ var (
 		Data3: 0x441a,
 		Data4: [8]byte{0x8d, 0xc0, 0xb8, 0x11, 0x04, 0xdf, 0x94, 0x9c},
 	}
+	iidAsyncOperationUserConsentVerifierAvailability = windows.GUID{
+		Data1: 0xddd384f3,
+		Data2: 0xd818,
+		Data3: 0x5d83,
+		Data4: [8]byte{0xab, 0x4b, 0x32, 0x11, 0x9c, 0x28, 0x58, 0x7c},
+	}
 	iidAsyncOperationUserConsentVerificationResult = windows.GUID{
 		Data1: 0xfd596ffd,
 		Data2: 0x2318,
 		Data3: 0x558f,
 		Data4: [8]byte{0x9d, 0xbe, 0xd2, 0x1d, 0xf4, 0x37, 0x64, 0xa5},
-	}
-	iidAsyncOperationCompletedHandlerUserConsentVerificationResult = windows.GUID{
-		Data1: 0x0cffc6c9,
-		Data2: 0x4c2b,
-		Data3: 0x5cd4,
-		Data4: [8]byte{0xb3, 0x8c, 0x7b, 0x8d, 0xf3, 0xff, 0x5a, 0xfb},
 	}
 )
 
@@ -197,7 +184,7 @@ func (a *windowsPromptAuthorizer) Require(ctx context.Context, vaultID string, i
 
 func (a *windowsPromptAuthorizer) selectBackend(ctx context.Context) windowsPresenceBackend {
 	hwnd := windowsConsoleWindow()
-	if windowsCurrentBuild() >= windowsHelloMinBuild && hwnd != 0 && windowsHelloUsable(ctx) {
+	if windowsHelloUsable(ctx) {
 		return windowsPresenceBackend{kind: windowsPresenceHello, hwnd: hwnd}
 	}
 	if windowsCredUIUsable() {
@@ -231,6 +218,12 @@ func realWindowsHelloUsable(ctx context.Context) bool {
 		return false
 	}
 	defer cleanup()
+	if windowsHelloStaticsAvailable(ctx) {
+		return true
+	}
+	if windowsCurrentBuild() < windowsHelloMinBuild || windowsConsoleWindow() == 0 {
+		return false
+	}
 	factory, err := winRTActivationFactory("Windows.Security.Credentials.UI.UserConsentVerifier", &iidUserConsentVerifierInterop)
 	if err != nil {
 		return false
@@ -240,8 +233,11 @@ func realWindowsHelloUsable(ctx context.Context) bool {
 }
 
 func realWindowsHelloPrompt(ctx context.Context, message string, hwnd uintptr) error {
+	if err := requestWindowsHelloStatics(ctx, message); err == nil {
+		return nil
+	}
 	if hwnd == 0 {
-		return errors.New("Windows Hello requires a parent window")
+		return errors.New("Windows Hello interop requires a parent window")
 	}
 	if err := findWinRTProcs(); err != nil {
 		return err
@@ -277,7 +273,70 @@ func realWindowsHelloPrompt(ctx context.Context, message string, hwnd uintptr) e
 		return errors.New("Windows Hello did not return a verification operation")
 	}
 	defer comRelease(operation)
-	result, err := waitWinAsyncInt32(ctx, operation, &iidAsyncOperationCompletedHandlerUserConsentVerificationResult)
+	result, err := waitWinAsyncInt32(ctx, operation)
+	if err != nil {
+		return err
+	}
+	if result != userConsentVerified {
+		return fmt.Errorf("Windows Hello verification was not accepted: result %d", result)
+	}
+	return nil
+}
+
+func windowsHelloStaticsAvailable(ctx context.Context) bool {
+	factory, err := winRTActivationFactory("Windows.Security.Credentials.UI.UserConsentVerifier", &iidUserConsentVerifierStatics)
+	if err != nil {
+		return false
+	}
+	defer comRelease(factory)
+	var operation uintptr
+	hr, _, _ := syscall.SyscallN(
+		comMethod(factory, 6),
+		factory,
+		uintptr(unsafe.Pointer(&operation)),
+	)
+	if failedHRESULT(hr) || operation == 0 {
+		return false
+	}
+	defer comRelease(operation)
+	result, err := waitWinAsyncInt32(ctx, operation)
+	return err == nil && result == userConsentVerifierAvailable
+}
+
+func requestWindowsHelloStatics(ctx context.Context, message string) error {
+	if err := findWinRTProcs(); err != nil {
+		return err
+	}
+	cleanup, err := winRTInitialize()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	factory, err := winRTActivationFactory("Windows.Security.Credentials.UI.UserConsentVerifier", &iidUserConsentVerifierStatics)
+	if err != nil {
+		return err
+	}
+	defer comRelease(factory)
+	messageString, releaseMessage, err := winRTString(message)
+	if err != nil {
+		return err
+	}
+	defer releaseMessage()
+	var operation uintptr
+	hr, _, _ := syscall.SyscallN(
+		comMethod(factory, 7),
+		factory,
+		messageString,
+		uintptr(unsafe.Pointer(&operation)),
+	)
+	if failedHRESULT(hr) {
+		return hresultError("UserConsentVerifier.RequestVerificationAsync", hr)
+	}
+	if operation == 0 {
+		return errors.New("UserConsentVerifier did not return a verification operation")
+	}
+	defer comRelease(operation)
+	result, err := waitWinAsyncInt32(ctx, operation)
 	if err != nil {
 		return err
 	}
@@ -355,33 +414,61 @@ func winRTString(value string) (uintptr, func(), error) {
 	return hstring, func() { procWindowsDeleteString.Call(hstring) }, nil
 }
 
-func waitWinAsyncInt32(ctx context.Context, operation uintptr, handlerIID *windows.GUID) (int32, error) {
-	handler := &winAsyncHandler{
-		vtbl: &winAsyncHandlerTable,
-		refs: 1,
-		iid:  *handlerIID,
-		done: make(chan int32, 1),
-	}
+func waitWinAsyncInt32(ctx context.Context, operation uintptr) (int32, error) {
+	var asyncInfo uintptr
 	hr, _, _ := syscall.SyscallN(
-		comMethod(operation, 6),
+		comMethod(operation, 0),
 		operation,
-		uintptr(unsafe.Pointer(handler)),
+		uintptr(unsafe.Pointer(&iidAsyncInfo)),
+		uintptr(unsafe.Pointer(&asyncInfo)),
 	)
 	if failedHRESULT(hr) {
-		return 0, hresultError("IAsyncOperation.put_Completed", hr)
+		return 0, hresultError("IAsyncOperation.QueryInterface(IAsyncInfo)", hr)
 	}
-	var status int32
-	select {
-	case status = <-handler.done:
-	case <-ctx.Done():
-		runtime.KeepAlive(handler)
-		return 0, ctx.Err()
-	case <-time.After(2 * time.Minute):
-		runtime.KeepAlive(handler)
-		return 0, errors.New("Windows verification timed out")
+	if asyncInfo == 0 {
+		return 0, errors.New("IAsyncOperation returned nil IAsyncInfo")
+	}
+	defer comRelease(asyncInfo)
+	deadline := time.After(2 * time.Minute)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	status := asyncStatusStarted
+	for status == asyncStatusStarted {
+		hr, _, _ = syscall.SyscallN(
+			comMethod(asyncInfo, 7),
+			asyncInfo,
+			uintptr(unsafe.Pointer(&status)),
+		)
+		if failedHRESULT(hr) {
+			return 0, hresultError("IAsyncInfo.get_Status", hr)
+		}
+		if status != asyncStatusStarted {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-deadline:
+			return 0, errors.New("Windows verification timed out")
+		case <-ticker.C:
+		}
+	}
+	if status == asyncStatusCanceled {
+		return 0, errors.New("Windows verification canceled")
+	}
+	if status == asyncStatusError {
+		var asyncErr uintptr
+		hr, _, _ = syscall.SyscallN(
+			comMethod(asyncInfo, 8),
+			asyncInfo,
+			uintptr(unsafe.Pointer(&asyncErr)),
+		)
+		if failedHRESULT(hr) {
+			return 0, hresultError("IAsyncInfo.get_ErrorCode", hr)
+		}
+		return 0, hresultError("Windows verification async operation", asyncErr)
 	}
 	if status != asyncStatusCompleted {
-		runtime.KeepAlive(handler)
 		return 0, fmt.Errorf("Windows verification did not complete successfully: async status %d", status)
 	}
 	var result int32
@@ -390,45 +477,10 @@ func waitWinAsyncInt32(ctx context.Context, operation uintptr, handlerIID *windo
 		operation,
 		uintptr(unsafe.Pointer(&result)),
 	)
-	runtime.KeepAlive(handler)
 	if failedHRESULT(hr) {
 		return 0, hresultError("IAsyncOperation.GetResults", hr)
 	}
 	return result, nil
-}
-
-func winAsyncHandlerQueryInterface(this uintptr, riid uintptr, out uintptr) uintptr {
-	if out == 0 {
-		return hresultPointer
-	}
-	*(*uintptr)(unsafe.Pointer(out)) = 0
-	handler := (*winAsyncHandler)(unsafe.Pointer(this))
-	requested := (*windows.GUID)(unsafe.Pointer(riid))
-	if equalGUID(requested, &iidIUnknown) || equalGUID(requested, &handler.iid) {
-		winAsyncHandlerAddRef(this)
-		*(*uintptr)(unsafe.Pointer(out)) = this
-		return hresultOK
-	}
-	return hresultNoInterface
-}
-
-func winAsyncHandlerAddRef(this uintptr) uintptr {
-	handler := (*winAsyncHandler)(unsafe.Pointer(this))
-	return uintptr(atomic.AddInt32(&handler.refs, 1))
-}
-
-func winAsyncHandlerRelease(this uintptr) uintptr {
-	handler := (*winAsyncHandler)(unsafe.Pointer(this))
-	return uintptr(atomic.AddInt32(&handler.refs, -1))
-}
-
-func winAsyncHandlerInvoke(this uintptr, operation uintptr, status uintptr) uintptr {
-	handler := (*winAsyncHandler)(unsafe.Pointer(this))
-	select {
-	case handler.done <- int32(status):
-	default:
-	}
-	return hresultOK
 }
 
 func realWindowsCredUIUsable() bool {
@@ -489,7 +541,7 @@ func promptWindowsCredentialOnce(ctx context.Context, message string, hwnd uintp
 	var outBuffer uintptr
 	var outBufferSize uint32
 	var save uint32
-	flags := uint32(credUIWinEnumerateCurrentUser | credUIWinSecurePrompt)
+	flags := uint32(credUIWinEnumerateCurrentUser)
 	ret, _, _ := procCredUIPromptForWindowsCredentials.Call(
 		uintptr(unsafe.Pointer(&info)),
 		0,
@@ -634,14 +686,4 @@ func failedHRESULT(hr uintptr) bool {
 
 func hresultError(operation string, hr uintptr) error {
 	return fmt.Errorf("%s failed: HRESULT 0x%08x", operation, uint32(hr))
-}
-
-func equalGUID(a, b *windows.GUID) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	return a.Data1 == b.Data1 &&
-		a.Data2 == b.Data2 &&
-		a.Data3 == b.Data3 &&
-		a.Data4 == b.Data4
 }
