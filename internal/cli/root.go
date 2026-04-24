@@ -10,7 +10,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -99,7 +98,13 @@ func (r *runtime) openCatalog(ctx context.Context) (*service.Catalog, *store.Sto
 	if err != nil {
 		return nil, nil, config.Paths{}, err
 	}
-	return service.NewCatalog(db, masterKey), db, manager.Paths, nil
+	if err := manager.EnsureCurrentSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, nil, config.Paths{}, err
+	}
+	return service.NewCatalogWithWriteKeyProvider(db, masterKey, func(inner context.Context) ([]byte, error) {
+		return manager.ResolveWriteKey(inner, db, promptSecret)
+	}), db, manager.Paths, nil
 }
 
 func (r *runtime) newVaultCmd() *cobra.Command {
@@ -109,8 +114,8 @@ func (r *runtime) newVaultCmd() *cobra.Command {
 	}
 	cmd.AddCommand(
 		r.newVaultInitCmd(),
-		r.newVaultUnlockCmd(),
-		r.newVaultLockCmd(),
+		r.newVaultKeychainCmd(),
+		r.newVaultMigrateCmd(),
 		r.newVaultChangePasswordCmd(),
 	)
 	return cmd
@@ -163,7 +168,20 @@ func (r *runtime) newVaultInitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return manager.Init(cmd.Context(), password)
+			if err := manager.Init(cmd.Context(), password); err != nil {
+				return err
+			}
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				enable, err := promptConfirm("Enable system keychain enrollment now")
+				if err != nil {
+					return err
+				}
+				if enable {
+					return manager.EnableKeychain(cmd.Context(), password)
+				}
+			}
+			_, err = fmt.Fprintln(cmd.ErrOrStderr(), "Keychain enrollment is disabled. Run `nermius vault keychain enable` later to enable it.")
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&password, "password", "", "Master password (avoid passing on shared shells)")
@@ -171,12 +189,15 @@ func (r *runtime) newVaultInitCmd() *cobra.Command {
 	return cmd
 }
 
-func (r *runtime) newVaultUnlockCmd() *cobra.Command {
+func (r *runtime) newVaultKeychainCmd() *cobra.Command {
 	var password string
-	var ttl time.Duration
 	cmd := &cobra.Command{
-		Use:   "unlock",
-		Short: "Unlock the vault and cache a session key locally",
+		Use:   "keychain",
+		Short: "Manage system keychain enrollment for vault unlock material",
+	}
+	enableCmd := &cobra.Command{
+		Use:   "enable",
+		Short: "Store the vault unlock material in the system keychain",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if password == "" {
 				value, err := promptSecret("Master password")
@@ -189,24 +210,50 @@ func (r *runtime) newVaultUnlockCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return manager.Unlock(cmd.Context(), password, ttl)
+			return manager.EnableKeychain(cmd.Context(), password)
 		},
 	}
-	cmd.Flags().StringVar(&password, "password", "", "Master password")
-	cmd.Flags().DurationVar(&ttl, "ttl", 8*time.Hour, "Session cache TTL")
-	return cmd
-}
-
-func (r *runtime) newVaultLockCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "lock",
-		Short: "Remove the cached session key",
+	enableCmd.Flags().StringVar(&password, "password", "", "Master password")
+	statusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show keychain enrollment and vault schema status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			manager, err := r.manager()
 			if err != nil {
 				return err
 			}
-			return manager.Lock()
+			status, err := manager.Status(cmd.Context())
+			if err != nil {
+				return err
+			}
+			return printJSON(status)
+		},
+	}
+	disableCmd := &cobra.Command{
+		Use:   "disable",
+		Short: "Remove the vault unlock material from the system keychain",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			manager, err := r.manager()
+			if err != nil {
+				return err
+			}
+			return manager.DisableKeychain(cmd.Context())
+		},
+	}
+	cmd.AddCommand(enableCmd, disableCmd, statusCmd)
+	return cmd
+}
+
+func (r *runtime) newVaultMigrateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "migrate",
+		Short: "Migrate a legacy vault to the whole-vault encrypted schema",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			manager, err := r.manager()
+			if err != nil {
+				return err
+			}
+			return manager.MigrateVault(cmd.Context(), promptSecret)
 		},
 	}
 }
@@ -601,12 +648,11 @@ func (r *runtime) newGetCmd(kind domain.DocumentKind) *cobra.Command {
 		Short: fmt.Sprintf("Get a %s by name, full ID, or unique short ID", kind),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, _, err := r.openStore(cmd.Context())
+			catalog, db, _, err := r.openCatalog(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer db.Close()
-			catalog := service.NewCatalog(db, nil)
 			rec, err := catalog.ResolveDocument(cmd.Context(), kind, args[0])
 			if err != nil {
 				return err
@@ -622,12 +668,12 @@ func (r *runtime) newListCmd(kind domain.DocumentKind) *cobra.Command {
 		Use:   "list",
 		Short: fmt.Sprintf("List %s", pluralizeKind(kind)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, _, err := r.openStore(cmd.Context())
+			catalog, db, _, err := r.openCatalog(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer db.Close()
-			items, err := db.ListDocuments(cmd.Context(), string(kind))
+			items, err := catalog.List(cmd.Context(), kind)
 			if err != nil {
 				return err
 			}
@@ -642,17 +688,16 @@ func (r *runtime) newDeleteCmd(kind domain.DocumentKind) *cobra.Command {
 		Short: fmt.Sprintf("Delete a %s by name, full ID, or unique short ID", kind),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, _, err := r.openStore(cmd.Context())
+			catalog, db, _, err := r.openCatalog(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer db.Close()
-			catalog := service.NewCatalog(db, nil)
 			rec, err := catalog.ResolveDocument(cmd.Context(), kind, args[0])
 			if err != nil {
 				return err
 			}
-			return db.DeleteDocument(cmd.Context(), rec.ID)
+			return catalog.Delete(cmd.Context(), rec.ID)
 		},
 	}
 }

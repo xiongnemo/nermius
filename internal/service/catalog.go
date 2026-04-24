@@ -8,19 +8,27 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nermius/nermius/internal/domain"
-	"github.com/nermius/nermius/internal/secret"
 	"github.com/nermius/nermius/internal/store"
 )
 
+type WriteKeyProvider func(context.Context) ([]byte, error)
+
 type Catalog struct {
-	store     *store.Store
-	masterKey []byte
+	store            *store.Store
+	readKey          []byte
+	writeKeyProvider WriteKeyProvider
+
+	mu        sync.RWMutex
+	loaded    bool
+	documents map[string]store.DocumentRecord
+	secrets   map[string]store.SecretRecord
 }
 
 var ErrAmbiguousReference = errors.New("reference is ambiguous")
@@ -32,22 +40,35 @@ type DocumentReference struct {
 	Field string              `json:"field"`
 }
 
-func NewCatalog(st *store.Store, masterKey []byte) *Catalog {
-	return &Catalog{store: st, masterKey: masterKey}
+func NewCatalog(st *store.Store, readKey []byte) *Catalog {
+	return NewCatalogWithWriteKeyProvider(st, readKey, nil)
+}
+
+func NewCatalogWithWriteKeyProvider(st *store.Store, readKey []byte, provider WriteKeyProvider) *Catalog {
+	return &Catalog{
+		store:            st,
+		readKey:          append([]byte(nil), readKey...),
+		writeKeyProvider: provider,
+	}
 }
 
 func (c *Catalog) SaveHost(ctx context.Context, host *domain.Host) error {
 	if strings.TrimSpace(host.Hostname) == "" {
 		return errors.New("hostname is required")
 	}
-	if err := c.normalizeHost(ctx, host); err != nil {
-		return err
-	}
-	if err := c.normalizeRoute(ctx, host.Route); err != nil {
-		return err
-	}
-	return c.saveEntity(ctx, domain.KindHost, host.ID, host.Label(), host, func(id string) { host.ID = id }, func(now time.Time) {
-		touchCreatedUpdated(&host.CreatedAt, &host.UpdatedAt, now)
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		if err := c.normalizeHost(ctx, writeKey, host); err != nil {
+			return err
+		}
+		if err := c.normalizeRoute(ctx, writeKey, host.Route); err != nil {
+			return err
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindHost, host.ID, host.Label(), host, func(id string) { host.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&host.CreatedAt, &host.UpdatedAt, now)
+		})
 	})
 }
 
@@ -55,8 +76,13 @@ func (c *Catalog) SaveGroup(ctx context.Context, group *domain.Group) error {
 	if strings.TrimSpace(group.Name) == "" {
 		return errors.New("name is required")
 	}
-	return c.saveEntity(ctx, domain.KindGroup, group.ID, group.Label(), group, func(id string) { group.ID = id }, func(now time.Time) {
-		touchCreatedUpdated(&group.CreatedAt, &group.UpdatedAt, now)
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindGroup, group.ID, group.Label(), group, func(id string) { group.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&group.CreatedAt, &group.UpdatedAt, now)
+		})
 	})
 }
 
@@ -64,11 +90,16 @@ func (c *Catalog) SaveProfile(ctx context.Context, profile *domain.Profile) erro
 	if strings.TrimSpace(profile.Name) == "" {
 		return errors.New("name is required")
 	}
-	if err := c.normalizeRoute(ctx, profile.Route); err != nil {
-		return err
-	}
-	return c.saveEntity(ctx, domain.KindProfile, profile.ID, profile.Label(), profile, func(id string) { profile.ID = id }, func(now time.Time) {
-		touchCreatedUpdated(&profile.CreatedAt, &profile.UpdatedAt, now)
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		if err := c.normalizeRoute(ctx, writeKey, profile.Route); err != nil {
+			return err
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindProfile, profile.ID, profile.Label(), profile, func(id string) { profile.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&profile.CreatedAt, &profile.UpdatedAt, now)
+		})
 	})
 }
 
@@ -79,11 +110,16 @@ func (c *Catalog) SaveIdentity(ctx context.Context, identity *domain.Identity) e
 	if len(identity.Methods) == 0 {
 		return errors.New("identity requires at least one auth method")
 	}
-	if err := c.normalizeIdentity(ctx, identity); err != nil {
-		return err
-	}
-	return c.saveEntity(ctx, domain.KindIdentity, identity.ID, identity.Label(), identity, func(id string) { identity.ID = id }, func(now time.Time) {
-		touchCreatedUpdated(&identity.CreatedAt, &identity.UpdatedAt, now)
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		if err := c.normalizeIdentity(ctx, writeKey, identity); err != nil {
+			return err
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindIdentity, identity.ID, identity.Label(), identity, func(id string) { identity.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&identity.CreatedAt, &identity.UpdatedAt, now)
+		})
 	})
 }
 
@@ -94,11 +130,16 @@ func (c *Catalog) SaveKey(ctx context.Context, key *domain.Key) error {
 	if key.Kind == "" {
 		key.Kind = domain.KeyKindPrivateKey
 	}
-	if err := c.normalizeKey(ctx, key); err != nil {
-		return err
-	}
-	return c.saveEntity(ctx, domain.KindKey, key.ID, key.Label(), key, func(id string) { key.ID = id }, func(now time.Time) {
-		touchCreatedUpdated(&key.CreatedAt, &key.UpdatedAt, now)
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		if err := c.normalizeKey(ctx, writeKey, key); err != nil {
+			return err
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindKey, key.ID, key.Label(), key, func(id string) { key.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&key.CreatedAt, &key.UpdatedAt, now)
+		})
 	})
 }
 
@@ -112,8 +153,13 @@ func (c *Catalog) SaveForward(ctx context.Context, forward *domain.Forward) erro
 	if forward.ListenPort == 0 {
 		return errors.New("listen_port is required")
 	}
-	return c.saveEntity(ctx, domain.KindForward, forward.ID, forward.Label(), forward, func(id string) { forward.ID = id }, func(now time.Time) {
-		touchCreatedUpdated(&forward.CreatedAt, &forward.UpdatedAt, now)
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindForward, forward.ID, forward.Label(), forward, func(id string) { forward.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&forward.CreatedAt, &forward.UpdatedAt, now)
+		})
 	})
 }
 
@@ -131,21 +177,24 @@ func (c *Catalog) SaveKnownHost(ctx context.Context, knownHost *domain.KnownHost
 	knownHost.Algorithm = key.Type()
 	knownHost.PublicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 	label := knownHostDocumentLabel(knownHost.Hosts, knownHost.Algorithm)
-	if existing, err := c.store.FindDocumentByLabel(ctx, string(domain.KindKnownHost), label); err == nil {
-		knownHost.ID = existing.ID
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if knownHost.Source == "" {
-		knownHost.Source = string(domain.KnownHostsBackendVault)
-	}
 	fingerprint, err := fingerprintAuthorizedKey(knownHost.PublicKey)
 	if err != nil {
 		return err
 	}
 	knownHost.FingerprintSHA256 = fingerprint
-	return c.saveEntity(ctx, domain.KindKnownHost, knownHost.ID, label, knownHost, func(id string) { knownHost.ID = id }, func(now time.Time) {
-		touchCreatedUpdated(&knownHost.CreatedAt, &knownHost.UpdatedAt, now)
+	if knownHost.Source == "" {
+		knownHost.Source = string(domain.KnownHostsBackendVault)
+	}
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		if existing := c.findDocumentByLabel(domain.KindKnownHost, label); existing != nil {
+			knownHost.ID = existing.ID
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindKnownHost, knownHost.ID, label, knownHost, func(id string) { knownHost.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&knownHost.CreatedAt, &knownHost.UpdatedAt, now)
+		})
 	})
 }
 
@@ -206,13 +255,28 @@ func (c *Catalog) GetKnownHost(ctx context.Context, id string) (*domain.KnownHos
 }
 
 func (c *Catalog) Delete(ctx context.Context, id string) error {
-	return c.store.DeleteDocument(ctx, id)
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		if err := c.store.DeleteRecord(ctx, id); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		delete(c.documents, id)
+		delete(c.secrets, id)
+		c.mu.Unlock()
+		return nil
+	})
 }
 
 func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]DocumentReference, error) {
 	targetID = strings.TrimSpace(targetID)
 	if targetID == "" {
 		return nil, errors.New("target id is required")
+	}
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
 	}
 	refs := []DocumentReference{}
 
@@ -244,15 +308,11 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 		}
 	}
 
-	profileRecs, err := c.store.AllDocuments(ctx, string(domain.KindProfile))
+	profiles, err := c.listProfiles(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for _, rec := range profileRecs {
-		var profile domain.Profile
-		if err := json.Unmarshal(rec.Body, &profile); err != nil {
-			return nil, err
-		}
+	for _, profile := range profiles {
 		if profile.IdentityRef != nil && *profile.IdentityRef == targetID {
 			refs = append(refs, DocumentReference{Kind: domain.KindProfile, ID: profile.ID, Label: profile.Label(), Field: "identity_ref"})
 		}
@@ -263,15 +323,11 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 		}
 	}
 
-	identityRecs, err := c.store.AllDocuments(ctx, string(domain.KindIdentity))
+	identities, err := c.listIdentities(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for _, rec := range identityRecs {
-		var identity domain.Identity
-		if err := json.Unmarshal(rec.Body, &identity); err != nil {
-			return nil, err
-		}
+	for _, identity := range identities {
 		for _, method := range identity.Methods {
 			if method.Type == domain.AuthMethodKey && method.KeyID == targetID {
 				refs = append(refs, DocumentReference{Kind: domain.KindIdentity, ID: identity.ID, Label: identity.Label(), Field: "methods.key_id"})
@@ -295,14 +351,17 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 }
 
 func (c *Catalog) List(ctx context.Context, kind domain.DocumentKind) ([]store.DocumentSummary, error) {
-	return c.store.ListDocuments(ctx, string(kind))
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	return c.listDocumentSummaries(kind), nil
 }
 
 func (c *Catalog) ListKnownHosts(ctx context.Context) ([]domain.KnownHost, error) {
-	recs, err := c.store.AllDocuments(ctx, string(domain.KindKnownHost))
-	if err != nil {
+	if err := c.ensureLoaded(ctx); err != nil {
 		return nil, err
 	}
+	recs := c.documentRecordsByKind(domain.KindKnownHost)
 	out := make([]domain.KnownHost, 0, len(recs))
 	for _, rec := range recs {
 		var knownHost domain.KnownHost
@@ -315,7 +374,16 @@ func (c *Catalog) ListKnownHosts(ctx context.Context) ([]domain.KnownHost, error
 }
 
 func (c *Catalog) LoadKindByID(ctx context.Context, id string) (store.DocumentRecord, error) {
-	return c.store.GetDocument(ctx, id)
+	if err := c.ensureLoaded(ctx); err != nil {
+		return store.DocumentRecord{}, err
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	rec, ok := c.documents[id]
+	if !ok {
+		return store.DocumentRecord{}, sql.ErrNoRows
+	}
+	return cloneDocumentRecord(rec), nil
 }
 
 func (c *Catalog) ResolveDocument(ctx context.Context, kind domain.DocumentKind, spec string) (store.DocumentRecord, error) {
@@ -323,25 +391,22 @@ func (c *Catalog) ResolveDocument(ctx context.Context, kind domain.DocumentKind,
 	if spec == "" {
 		return store.DocumentRecord{}, errors.New("reference is required")
 	}
-	rec, err := c.store.GetDocument(ctx, spec)
-	if err == nil {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return store.DocumentRecord{}, err
+	}
+	c.mu.RLock()
+	if rec, ok := c.documents[spec]; ok {
+		c.mu.RUnlock()
 		if rec.Kind != string(kind) {
 			return store.DocumentRecord{}, fmt.Errorf("%s is %s, not %s", spec, rec.Kind, kind)
 		}
-		return rec, nil
+		return cloneDocumentRecord(rec), nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return store.DocumentRecord{}, err
+	c.mu.RUnlock()
+	if rec := c.findDocumentByLabel(kind, spec); rec != nil {
+		return cloneDocumentRecord(*rec), nil
 	}
-	if rec, err := c.store.FindDocumentByLabel(ctx, string(kind), spec); err == nil {
-		return rec, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return store.DocumentRecord{}, err
-	}
-	items, err := c.store.ListDocuments(ctx, string(kind))
-	if err != nil {
-		return store.DocumentRecord{}, err
-	}
+	items := c.listDocumentSummaries(kind)
 	labelMatches := make([]store.DocumentSummary, 0, 2)
 	for _, item := range items {
 		if strings.EqualFold(item.Label, spec) {
@@ -350,7 +415,7 @@ func (c *Catalog) ResolveDocument(ctx context.Context, kind domain.DocumentKind,
 	}
 	switch len(labelMatches) {
 	case 1:
-		return c.store.GetDocument(ctx, labelMatches[0].ID)
+		return c.LoadKindByID(ctx, labelMatches[0].ID)
 	case 0:
 	default:
 		parts := make([]string, 0, len(labelMatches))
@@ -369,7 +434,7 @@ func (c *Catalog) ResolveDocument(ctx context.Context, kind domain.DocumentKind,
 	case 0:
 		return store.DocumentRecord{}, sql.ErrNoRows
 	case 1:
-		return c.store.GetDocument(ctx, matches[0].ID)
+		return c.LoadKindByID(ctx, matches[0].ID)
 	default:
 		parts := make([]string, 0, len(matches))
 		for _, match := range matches {
@@ -470,49 +535,98 @@ func (c *Catalog) PutSecret(ctx context.Context, kind domain.SecretKind, existin
 	if len(plaintext) == 0 {
 		return existingID, nil
 	}
-	id := existingID
-	if id == "" {
-		id = uuid.NewString()
-	}
-	env, err := secret.SealEnvelope(c.masterKey, plaintext)
-	if err != nil {
-		return "", err
-	}
-	err = c.store.PutSecret(ctx, store.SecretRecord{
-		ID:                   id,
-		Kind:                 string(kind),
-		WrappedKeyNonce:      env.WrappedKeyNonce,
-		WrappedKeyCiphertext: env.WrappedKeyCiphertext,
-		PayloadNonce:         env.PayloadNonce,
-		PayloadCiphertext:    env.PayloadCiphertext,
+	var out string
+	err := c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		id, err := c.putSecretWithKey(ctx, writeKey, kind, existingID, plaintext)
+		if err != nil {
+			return err
+		}
+		out = id
+		return nil
 	})
-	return id, err
+	return out, err
 }
 
 func (c *Catalog) OpenSecret(ctx context.Context, id string) ([]byte, error) {
-	rec, err := c.store.GetSecret(ctx, id)
-	if err != nil {
+	if err := c.ensureLoaded(ctx); err != nil {
 		return nil, err
 	}
-	return secret.OpenEnvelope(c.masterKey, secret.EnvelopeSecret{
-		WrappedKeyNonce:      rec.WrappedKeyNonce,
-		WrappedKeyCiphertext: rec.WrappedKeyCiphertext,
-		PayloadNonce:         rec.PayloadNonce,
-		PayloadCiphertext:    rec.PayloadCiphertext,
-	})
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	rec, ok := c.secrets[id]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	return append([]byte(nil), rec.Payload...), nil
 }
 
-func (c *Catalog) saveEntity(ctx context.Context, kind domain.DocumentKind, id, label string, value any, setID func(string), touch func(time.Time)) error {
+func (c *Catalog) ensureLoaded(ctx context.Context) error {
+	c.mu.RLock()
+	if c.loaded {
+		c.mu.RUnlock()
+		return nil
+	}
+	c.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.loaded {
+		return nil
+	}
+	records, err := c.store.ListRecords(ctx)
+	if err != nil {
+		return err
+	}
+	if len(records) > 0 && len(c.readKey) == 0 {
+		return errors.New("catalog read key is unavailable")
+	}
+	documents := map[string]store.DocumentRecord{}
+	secrets := map[string]store.SecretRecord{}
+	for _, rec := range records {
+		payload, err := openRecordPayload(c.readKey, rec)
+		if err != nil {
+			return err
+		}
+		switch payload.Class {
+		case store.RecordClassDocument:
+			documents[rec.ID] = store.DocumentRecord{
+				ID:        rec.ID,
+				Kind:      payload.Kind,
+				Label:     payload.Label,
+				Body:      append([]byte(nil), payload.Body...),
+				CreatedAt: payload.CreatedAt,
+				UpdatedAt: payload.UpdatedAt,
+			}
+		case store.RecordClassSecret:
+			secrets[rec.ID] = store.SecretRecord{
+				ID:        rec.ID,
+				Kind:      payload.Kind,
+				Payload:   append([]byte(nil), payload.Body...),
+				CreatedAt: payload.CreatedAt,
+				UpdatedAt: payload.UpdatedAt,
+			}
+		default:
+			return fmt.Errorf("unsupported record class %q", payload.Class)
+		}
+	}
+	c.documents = documents
+	c.secrets = secrets
+	c.loaded = true
+	return nil
+}
+
+func (c *Catalog) saveEntityWithKey(ctx context.Context, writeKey []byte, kind domain.DocumentKind, id, label string, value any, setID func(string), touch func(time.Time)) error {
 	if id == "" {
 		setID(uuid.NewString())
 	}
 	if strings.TrimSpace(label) == "" {
 		return errors.New("label is required")
 	}
-	if existing, err := c.store.FindDocumentByLabel(ctx, string(kind), label); err == nil && existing.ID != id && existing.ID != currentID(value) {
+	if existing := c.findDocumentByLabel(kind, label); existing != nil && existing.ID != id && existing.ID != currentID(value) {
 		return fmt.Errorf("%s name %q already exists", kind, label)
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
 	}
 	now := time.Now().UTC()
 	touch(now)
@@ -521,17 +635,21 @@ func (c *Catalog) saveEntity(ctx context.Context, kind domain.DocumentKind, id, 
 		return err
 	}
 	entityID := currentID(value)
-	return c.store.PutDocument(ctx, store.DocumentRecord{
+	rec := store.DocumentRecord{
 		ID:        entityID,
 		Kind:      string(kind),
 		Label:     label,
 		Body:      body,
 		UpdatedAt: now,
-	})
+	}
+	if existing, ok := c.documents[entityID]; ok {
+		rec.CreatedAt = existing.CreatedAt
+	}
+	return c.persistDocumentWithKey(ctx, writeKey, rec)
 }
 
 func (c *Catalog) loadEntity(ctx context.Context, id string, kind domain.DocumentKind, out any) error {
-	rec, err := c.store.GetDocument(ctx, id)
+	rec, err := c.LoadKindByID(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -541,11 +659,11 @@ func (c *Catalog) loadEntity(ctx context.Context, id string, kind domain.Documen
 	return json.Unmarshal(rec.Body, out)
 }
 
-func (c *Catalog) normalizeIdentity(ctx context.Context, identity *domain.Identity) error {
+func (c *Catalog) normalizeIdentity(ctx context.Context, writeKey []byte, identity *domain.Identity) error {
 	for i := range identity.Methods {
 		method := &identity.Methods[i]
 		if method.Type == domain.AuthMethodPassword && method.Password != "" {
-			id, err := c.PutSecret(ctx, domain.SecretKindPassword, method.PasswordSecretID, []byte(method.Password))
+			id, err := c.putSecretWithKey(ctx, writeKey, domain.SecretKindPassword, method.PasswordSecretID, []byte(method.Password))
 			if err != nil {
 				return err
 			}
@@ -556,11 +674,11 @@ func (c *Catalog) normalizeIdentity(ctx context.Context, identity *domain.Identi
 	return nil
 }
 
-func (c *Catalog) normalizeHost(ctx context.Context, host *domain.Host) error {
+func (c *Catalog) normalizeHost(ctx context.Context, writeKey []byte, host *domain.Host) error {
 	if host == nil || host.Password == "" {
 		return nil
 	}
-	id, err := c.PutSecret(ctx, domain.SecretKindPassword, host.PasswordSecretID, []byte(host.Password))
+	id, err := c.putSecretWithKey(ctx, writeKey, domain.SecretKindPassword, host.PasswordSecretID, []byte(host.Password))
 	if err != nil {
 		return err
 	}
@@ -569,9 +687,9 @@ func (c *Catalog) normalizeHost(ctx context.Context, host *domain.Host) error {
 	return nil
 }
 
-func (c *Catalog) normalizeKey(ctx context.Context, key *domain.Key) error {
+func (c *Catalog) normalizeKey(ctx context.Context, writeKey []byte, key *domain.Key) error {
 	if key.PrivateKeyPEM != "" {
-		id, err := c.PutSecret(ctx, domain.SecretKindPrivateKey, key.PrivateKeySecretID, []byte(key.PrivateKeyPEM))
+		id, err := c.putSecretWithKey(ctx, writeKey, domain.SecretKindPrivateKey, key.PrivateKeySecretID, []byte(key.PrivateKeyPEM))
 		if err != nil {
 			return err
 		}
@@ -579,7 +697,7 @@ func (c *Catalog) normalizeKey(ctx context.Context, key *domain.Key) error {
 		key.PrivateKeyPEM = ""
 	}
 	if key.Passphrase != "" {
-		id, err := c.PutSecret(ctx, domain.SecretKindPassphrase, key.PassphraseSecretID, []byte(key.Passphrase))
+		id, err := c.putSecretWithKey(ctx, writeKey, domain.SecretKindPassphrase, key.PassphraseSecretID, []byte(key.Passphrase))
 		if err != nil {
 			return err
 		}
@@ -592,11 +710,11 @@ func (c *Catalog) normalizeKey(ctx context.Context, key *domain.Key) error {
 	return nil
 }
 
-func (c *Catalog) normalizeRoute(ctx context.Context, route *domain.Route) error {
+func (c *Catalog) normalizeRoute(ctx context.Context, writeKey []byte, route *domain.Route) error {
 	if route == nil || route.OutboundProxy == nil || route.OutboundProxy.Password == "" {
 		return nil
 	}
-	id, err := c.PutSecret(ctx, domain.SecretKindProxyAuth, route.OutboundProxy.PasswordSecretID, []byte(route.OutboundProxy.Password))
+	id, err := c.putSecretWithKey(ctx, writeKey, domain.SecretKindProxyAuth, route.OutboundProxy.PasswordSecretID, []byte(route.OutboundProxy.Password))
 	if err != nil {
 		return err
 	}
@@ -606,10 +724,10 @@ func (c *Catalog) normalizeRoute(ctx context.Context, route *domain.Route) error
 }
 
 func (c *Catalog) listHosts(ctx context.Context) ([]domain.Host, error) {
-	recs, err := c.store.AllDocuments(ctx, string(domain.KindHost))
-	if err != nil {
+	if err := c.ensureLoaded(ctx); err != nil {
 		return nil, err
 	}
+	recs := c.documentRecordsByKind(domain.KindHost)
 	out := make([]domain.Host, 0, len(recs))
 	for _, rec := range recs {
 		var host domain.Host
@@ -619,6 +737,191 @@ func (c *Catalog) listHosts(ctx context.Context) ([]domain.Host, error) {
 		out = append(out, host)
 	}
 	return out, nil
+}
+
+func (c *Catalog) listProfiles(ctx context.Context) ([]domain.Profile, error) {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	recs := c.documentRecordsByKind(domain.KindProfile)
+	out := make([]domain.Profile, 0, len(recs))
+	for _, rec := range recs {
+		var profile domain.Profile
+		if err := json.Unmarshal(rec.Body, &profile); err != nil {
+			return nil, err
+		}
+		out = append(out, profile)
+	}
+	return out, nil
+}
+
+func (c *Catalog) listIdentities(ctx context.Context) ([]domain.Identity, error) {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	recs := c.documentRecordsByKind(domain.KindIdentity)
+	out := make([]domain.Identity, 0, len(recs))
+	for _, rec := range recs {
+		var identity domain.Identity
+		if err := json.Unmarshal(rec.Body, &identity); err != nil {
+			return nil, err
+		}
+		out = append(out, identity)
+	}
+	return out, nil
+}
+
+func (c *Catalog) documentRecordsByKind(kind domain.DocumentKind) []store.DocumentRecord {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]store.DocumentRecord, 0)
+	for _, rec := range c.documents {
+		if rec.Kind != string(kind) {
+			continue
+		}
+		out = append(out, cloneDocumentRecord(rec))
+	}
+	slices.SortFunc(out, func(left, right store.DocumentRecord) int {
+		if !strings.EqualFold(left.Label, right.Label) {
+			return strings.Compare(strings.ToLower(left.Label), strings.ToLower(right.Label))
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+	return out
+}
+
+func (c *Catalog) listDocumentSummaries(kind domain.DocumentKind) []store.DocumentSummary {
+	recs := c.documentRecordsByKind(kind)
+	out := make([]store.DocumentSummary, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, store.DocumentSummary{
+			ID:        rec.ID,
+			Kind:      rec.Kind,
+			Label:     rec.Label,
+			UpdatedAt: rec.UpdatedAt,
+		})
+	}
+	return out
+}
+
+func (c *Catalog) findDocumentByLabel(kind domain.DocumentKind, label string) *store.DocumentRecord {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, rec := range c.documents {
+		if rec.Kind == string(kind) && rec.Label == label {
+			copyRec := cloneDocumentRecord(rec)
+			return &copyRec
+		}
+	}
+	return nil
+}
+
+func (c *Catalog) putSecretWithKey(ctx context.Context, writeKey []byte, kind domain.SecretKind, existingID string, plaintext []byte) (string, error) {
+	if len(plaintext) == 0 {
+		return existingID, nil
+	}
+	id := existingID
+	if id == "" {
+		id = uuid.NewString()
+	}
+	rec := store.SecretRecord{
+		ID:      id,
+		Kind:    string(kind),
+		Payload: append([]byte(nil), plaintext...),
+	}
+	if existing, ok := c.secrets[id]; ok {
+		rec.CreatedAt = existing.CreatedAt
+	}
+	if err := c.persistSecretWithKey(ctx, writeKey, rec); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (c *Catalog) persistDocumentWithKey(ctx context.Context, writeKey []byte, rec store.DocumentRecord) error {
+	now := time.Now().UTC()
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = now
+	}
+	if rec.UpdatedAt.IsZero() {
+		rec.UpdatedAt = now
+	}
+	encrypted, err := sealPayloadWithKey(writeKey, rec.ID, vaultRecordPayload{
+		Class:     store.RecordClassDocument,
+		Kind:      rec.Kind,
+		Label:     rec.Label,
+		Body:      rec.Body,
+		CreatedAt: rec.CreatedAt,
+		UpdatedAt: rec.UpdatedAt,
+	})
+	if err != nil {
+		return err
+	}
+	if err := c.store.PutRecord(ctx, encrypted); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.documents[rec.ID] = cloneDocumentRecord(rec)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Catalog) persistSecretWithKey(ctx context.Context, writeKey []byte, rec store.SecretRecord) error {
+	now := time.Now().UTC()
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = now
+	}
+	if rec.UpdatedAt.IsZero() {
+		rec.UpdatedAt = now
+	}
+	encrypted, err := sealPayloadWithKey(writeKey, rec.ID, vaultRecordPayload{
+		Class:     store.RecordClassSecret,
+		Kind:      rec.Kind,
+		Body:      rec.Payload,
+		CreatedAt: rec.CreatedAt,
+		UpdatedAt: rec.UpdatedAt,
+	})
+	if err != nil {
+		return err
+	}
+	if err := c.store.PutRecord(ctx, encrypted); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.secrets[rec.ID] = store.SecretRecord{
+		ID:        rec.ID,
+		Kind:      rec.Kind,
+		Payload:   append([]byte(nil), rec.Payload...),
+		CreatedAt: rec.CreatedAt,
+		UpdatedAt: rec.UpdatedAt,
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Catalog) withWriteKey(ctx context.Context, fn func([]byte) error) error {
+	writeKey, err := c.resolveWriteKey(ctx)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(writeKey)
+	return fn(writeKey)
+}
+
+func (c *Catalog) resolveWriteKey(ctx context.Context) ([]byte, error) {
+	if c.writeKeyProvider != nil {
+		return c.writeKeyProvider(ctx)
+	}
+	if len(c.readKey) == 0 {
+		return nil, errors.New("catalog write key is unavailable")
+	}
+	return append([]byte(nil), c.readKey...), nil
+}
+
+func cloneDocumentRecord(in store.DocumentRecord) store.DocumentRecord {
+	out := in
+	out.Body = append([]byte(nil), in.Body...)
+	return out
 }
 
 func collectForwardIDs(host domain.Host, profiles []domain.Profile) []string {

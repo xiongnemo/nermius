@@ -153,6 +153,41 @@ func TestCompletionSuggestsHostDirectKeyFlag(t *testing.T) {
 	}
 }
 
+func TestVaultHelpShowsKeychainAndMigrateInsteadOfUnlockLock(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"vault", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(vault --help) returned error: %v", err)
+	}
+	help := out.String()
+	if !bytes.Contains([]byte(help), []byte("keychain")) {
+		t.Fatalf("expected vault help to include keychain, got:\n%s", help)
+	}
+	if !bytes.Contains([]byte(help), []byte("migrate")) {
+		t.Fatalf("expected vault help to include migrate, got:\n%s", help)
+	}
+	if bytes.Contains([]byte(help), []byte("\n  unlock")) || bytes.Contains([]byte(help), []byte("\n  lock")) {
+		t.Fatalf("expected vault help to omit unlock/lock, got:\n%s", help)
+	}
+}
+
+func TestCompletionSuggestsVaultKeychainSubcommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "vault", "k"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete vault k) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("keychain")) {
+		t.Fatalf("expected completion to suggest keychain, got:\n%s", out.String())
+	}
+}
+
 func newCLITestCatalog(t *testing.T) (*service.Catalog, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vault.db")

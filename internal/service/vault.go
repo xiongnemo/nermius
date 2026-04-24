@@ -2,12 +2,13 @@ package service
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/nermius/nermius/internal/config"
 	"github.com/nermius/nermius/internal/secret"
@@ -15,19 +16,16 @@ import (
 )
 
 const (
-	metaKDF        = "vault.kdf"
-	metaWrappedKey = "vault.wrapped_key"
+	metaKDF           = "vault.kdf"
+	metaWrappedKey    = "vault.wrapped_key"
+	metaVaultID       = "vault.id"
+	metaSchemaVersion = "vault.schema_version"
 )
 
 type PasswordPrompter func(label string) (string, error)
 
 type VaultManager struct {
 	Paths config.Paths
-}
-
-type SessionState struct {
-	VaultKey  string    `json:"vault_key"`
-	ExpiresAt time.Time `json:"expires_at"`
 }
 
 func NewVaultManager(paths config.Paths) *VaultManager {
@@ -68,6 +66,7 @@ func (m *VaultManager) Init(ctx context.Context, password string) error {
 	if err != nil {
 		return err
 	}
+	defer zeroBytes(vaultKey)
 	wrapped, err := secret.WrapVaultKey(kek, vaultKey)
 	if err != nil {
 		return err
@@ -80,30 +79,18 @@ func (m *VaultManager) Init(ctx context.Context, password string) error {
 	if err != nil {
 		return err
 	}
-	if err := db.SetMeta(ctx, metaKDF, kdfEncoded); err != nil {
-		return err
+	for key, value := range map[string]string{
+		metaKDF:           kdfEncoded,
+		metaWrappedKey:    wrappedEncoded,
+		metaVaultID:       uuid.NewString(),
+		metaSchemaVersion: store.CurrentSchemaVersion,
+	} {
+		if err := db.SetMeta(ctx, key, value); err != nil {
+			return err
+		}
 	}
-	if err := db.SetMeta(ctx, metaWrappedKey, wrappedEncoded); err != nil {
-		return err
-	}
-	return m.writeSession(vaultKey, 8*time.Hour)
-}
-
-func (m *VaultManager) Unlock(ctx context.Context, password string, ttl time.Duration) error {
-	db, err := m.Open(ctx)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	vaultKey, err := m.unwrapVaultKey(ctx, db, password)
-	if err != nil {
-		return err
-	}
-	return m.writeSession(vaultKey, ttl)
-}
-
-func (m *VaultManager) Lock() error {
-	return config.RemoveIfExists(m.Paths.SessionPath)
+	_ = config.RemoveIfExists(m.Paths.SessionPath)
+	return nil
 }
 
 func (m *VaultManager) ChangePassword(ctx context.Context, oldPassword, newPassword string) error {
@@ -116,6 +103,7 @@ func (m *VaultManager) ChangePassword(ctx context.Context, oldPassword, newPassw
 	if err != nil {
 		return err
 	}
+	defer zeroBytes(vaultKey)
 	kdf := secret.DefaultKDFParams()
 	kek := secret.DeriveKEK(newPassword, kdf)
 	wrapped, err := secret.WrapVaultKey(kek, vaultKey)
@@ -136,7 +124,108 @@ func (m *VaultManager) ChangePassword(ctx context.Context, oldPassword, newPassw
 	if err := db.SetMeta(ctx, metaWrappedKey, wrappedEncoded); err != nil {
 		return err
 	}
-	return m.writeSession(vaultKey, 8*time.Hour)
+	status, err := m.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if status.KeychainEnabled && status.BackendKind == "unavailable" {
+		return errors.New("keychain enrollment is enabled but the current backend is unavailable")
+	}
+	return nil
+}
+
+func (m *VaultManager) Status(ctx context.Context) (VaultStatus, error) {
+	db, err := m.Open(ctx)
+	if err != nil {
+		return VaultStatus{}, err
+	}
+	defer db.Close()
+	initialized, err := db.IsInitialized(ctx)
+	if err != nil {
+		return VaultStatus{}, err
+	}
+	storeBackend := newUnlockMaterialStore(m.Paths)
+	presence := newPresenceAuthorizer(m.Paths)
+	status := VaultStatus{
+		Initialized:         initialized,
+		BackendKind:         storeBackend.Kind(),
+		UserPresenceCapable: presence.UserPresence(),
+	}
+	if !initialized {
+		return status, nil
+	}
+	schemaVersion, err := m.schemaVersion(ctx, db)
+	if err != nil {
+		return VaultStatus{}, err
+	}
+	status.SchemaVersion = schemaVersion
+	vaultID, err := m.vaultID(ctx, db)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return VaultStatus{}, err
+	}
+	status.CurrentVaultID = vaultID
+	available, _ := storeBackend.Available(ctx)
+	if available && vaultID != "" {
+		enabled, err := storeBackend.IsEnrolled(ctx, vaultID)
+		if err != nil {
+			return VaultStatus{}, err
+		}
+		status.KeychainEnabled = enabled
+		if enabled {
+			status.UnlockMaterialSource = storeBackend.Kind()
+		}
+	}
+	return status, nil
+}
+
+func (m *VaultManager) EnableKeychain(ctx context.Context, password string) error {
+	db, err := m.Open(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := m.EnsureCurrentSchema(ctx, db); err != nil {
+		return err
+	}
+	vaultID, err := m.vaultID(ctx, db)
+	if err != nil {
+		return err
+	}
+	storeBackend := newUnlockMaterialStore(m.Paths)
+	available, message := storeBackend.Available(ctx)
+	if !available {
+		if message == "" {
+			message = "system keychain backend unavailable"
+		}
+		return errors.New(message)
+	}
+	vaultKey, err := m.unwrapVaultKey(ctx, db, password)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(vaultKey)
+	return storeBackend.Store(ctx, vaultID, vaultKey)
+}
+
+func (m *VaultManager) DisableKeychain(ctx context.Context) error {
+	db, err := m.Open(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	vaultID, err := m.vaultID(ctx, db)
+	if err != nil {
+		return err
+	}
+	storeBackend := newUnlockMaterialStore(m.Paths)
+	available, message := storeBackend.Available(ctx)
+	if !available {
+		if message == "" {
+			message = "system keychain backend unavailable"
+		}
+		return errors.New(message)
+	}
+	return storeBackend.Delete(ctx, vaultID)
 }
 
 func (m *VaultManager) ResolveMasterKey(ctx context.Context, prompt PasswordPrompter) ([]byte, *store.Store, error) {
@@ -144,7 +233,7 @@ func (m *VaultManager) ResolveMasterKey(ctx context.Context, prompt PasswordProm
 	if err != nil {
 		return nil, nil, err
 	}
-	key, err := m.resolveMasterKeyWithStore(ctx, db, prompt)
+	key, err := m.resolveKeyWithStore(ctx, db, prompt, vaultAccessRead)
 	if err != nil {
 		_ = db.Close()
 		return nil, nil, err
@@ -152,21 +241,181 @@ func (m *VaultManager) ResolveMasterKey(ctx context.Context, prompt PasswordProm
 	return key, db, nil
 }
 
-func (m *VaultManager) resolveMasterKeyWithStore(ctx context.Context, db *store.Store, prompt PasswordPrompter) ([]byte, error) {
+func (m *VaultManager) ResolveWriteKey(ctx context.Context, db *store.Store, prompt PasswordPrompter) ([]byte, error) {
+	return m.resolveKeyWithStore(ctx, db, prompt, vaultAccessWrite)
+}
+
+func (m *VaultManager) EnsureCurrentSchema(ctx context.Context, db *store.Store) error {
+	version, err := m.schemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if version != store.CurrentSchemaVersion {
+		return fmt.Errorf("vault schema %s requires `nermius vault migrate`", version)
+	}
+	return nil
+}
+
+func (m *VaultManager) MigrateVault(ctx context.Context, prompt PasswordPrompter) error {
+	db, err := m.Open(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	initialized, err := db.IsInitialized(ctx)
+	if err != nil {
+		return err
+	}
+	if !initialized {
+		return errors.New("vault is not initialized")
+	}
+	version, err := m.schemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if version == store.CurrentSchemaVersion {
+		return nil
+	}
+	vaultKey, err := m.resolvePasswordPromptOnly(ctx, db, prompt)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(vaultKey)
+	if err := backupFile(m.Paths.VaultPath, m.Paths.VaultPath+".bak.pre-schema-v2"); err != nil {
+		return err
+	}
+	legacyDocs, err := db.ListLegacyDocuments(ctx)
+	if err != nil {
+		return err
+	}
+	legacySecrets, err := db.ListLegacySecrets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range legacyDocs {
+		encrypted, err := sealPayloadWithKey(vaultKey, rec.ID, vaultRecordPayload{
+			Class:     store.RecordClassDocument,
+			Kind:      rec.Kind,
+			Label:     rec.Label,
+			Body:      rec.Body,
+			CreatedAt: rec.CreatedAt,
+			UpdatedAt: rec.UpdatedAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := db.PutRecord(ctx, encrypted); err != nil {
+			return err
+		}
+	}
+	for _, rec := range legacySecrets {
+		payload, err := secret.OpenEnvelope(vaultKey, secret.EnvelopeSecret{
+			WrappedKeyNonce:      rec.WrappedKeyNonce,
+			WrappedKeyCiphertext: rec.WrappedKeyCiphertext,
+			PayloadNonce:         rec.PayloadNonce,
+			PayloadCiphertext:    rec.PayloadCiphertext,
+		})
+		if err != nil {
+			return err
+		}
+		encrypted, err := sealPayloadWithKey(vaultKey, rec.ID, vaultRecordPayload{
+			Class:     store.RecordClassSecret,
+			Kind:      rec.Kind,
+			Body:      payload,
+			CreatedAt: rec.CreatedAt,
+			UpdatedAt: rec.UpdatedAt,
+		})
+		zeroBytes(payload)
+		if err != nil {
+			return err
+		}
+		if err := db.PutRecord(ctx, encrypted); err != nil {
+			return err
+		}
+	}
+	vaultID, err := m.vaultID(ctx, db)
+	if errors.Is(err, sql.ErrNoRows) || vaultID == "" {
+		vaultID = uuid.NewString()
+		if err := db.SetMeta(ctx, metaVaultID, vaultID); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := db.SetMeta(ctx, metaSchemaVersion, store.CurrentSchemaVersion); err != nil {
+		return err
+	}
+	if err := db.ClearLegacyData(ctx); err != nil {
+		return err
+	}
+	return db.Vacuum(ctx)
+}
+
+func (m *VaultManager) resolveKeyWithStore(ctx context.Context, db *store.Store, prompt PasswordPrompter, intent vaultAccessIntent) ([]byte, error) {
 	if raw, ok := os.LookupEnv("NERMIUS_MASTER_PASSWORD"); ok && raw != "" {
 		return m.unwrapVaultKey(ctx, db, raw)
 	}
-	if key, err := m.readSession(); err == nil {
+	if key, err := m.resolveFromKeychain(ctx, db, intent); err == nil {
 		return key, nil
 	}
+	return m.resolvePasswordPromptOnly(ctx, db, prompt)
+}
+
+func (m *VaultManager) resolvePasswordPromptOnly(ctx context.Context, db *store.Store, prompt PasswordPrompter) ([]byte, error) {
 	if prompt == nil {
-		return nil, errors.New("vault is locked; run `nermius vault unlock` or set NERMIUS_MASTER_PASSWORD")
+		return nil, errors.New("vault is locked; set NERMIUS_MASTER_PASSWORD or provide the master password")
 	}
 	password, err := prompt("Master password")
 	if err != nil {
 		return nil, err
 	}
 	return m.unwrapVaultKey(ctx, db, password)
+}
+
+func (m *VaultManager) resolveFromKeychain(ctx context.Context, db *store.Store, intent vaultAccessIntent) ([]byte, error) {
+	version, err := m.schemaVersion(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if version != store.CurrentSchemaVersion {
+		return nil, fmt.Errorf("vault schema %s does not support keychain enrollment", version)
+	}
+	vaultID, err := m.vaultID(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	storeBackend := newUnlockMaterialStore(m.Paths)
+	available, message := storeBackend.Available(ctx)
+	if !available {
+		if message == "" {
+			message = "system keychain backend unavailable"
+		}
+		return nil, errors.New(message)
+	}
+	enrolled, err := storeBackend.IsEnrolled(ctx, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	if !enrolled {
+		return nil, errors.New("vault is not enrolled in the system keychain")
+	}
+	presence := newPresenceAuthorizer(m.Paths)
+	if err := presence.Require(ctx, vaultID, intent); err != nil {
+		return nil, err
+	}
+	return storeBackend.Load(ctx, vaultID, intent)
+}
+
+func (m *VaultManager) schemaVersion(ctx context.Context, db *store.Store) (string, error) {
+	value, err := db.GetMeta(ctx, metaSchemaVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "1", nil
+	}
+	return value, err
+}
+
+func (m *VaultManager) vaultID(ctx context.Context, db *store.Store) (string, error) {
+	return db.GetMeta(ctx, metaVaultID)
 }
 
 func (m *VaultManager) unwrapVaultKey(ctx context.Context, db *store.Store, password string) ([]byte, error) {
@@ -190,33 +439,19 @@ func (m *VaultManager) unwrapVaultKey(ctx context.Context, db *store.Store, pass
 	return secret.UnwrapVaultKey(kek, wrapped)
 }
 
-func (m *VaultManager) writeSession(vaultKey []byte, ttl time.Duration) error {
-	if err := config.EnsureLayout(m.Paths); err != nil {
-		return err
-	}
-	state := SessionState{
-		VaultKey:  base64.StdEncoding.EncodeToString(vaultKey),
-		ExpiresAt: time.Now().Add(ttl).UTC(),
-	}
-	raw, err := json.Marshal(state)
+func backupFile(src, dst string) error {
+	input, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return config.EnsurePrivateFile(m.Paths.SessionPath, raw)
-}
-
-func (m *VaultManager) readSession() ([]byte, error) {
-	raw, err := os.ReadFile(m.Paths.SessionPath)
+	defer input.Close()
+	output, err := os.Create(dst)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var state SessionState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil, err
+	defer output.Close()
+	if _, err := io.Copy(output, input); err != nil {
+		return err
 	}
-	if time.Now().UTC().After(state.ExpiresAt) {
-		_ = config.RemoveIfExists(m.Paths.SessionPath)
-		return nil, fmt.Errorf("session expired")
-	}
-	return base64.StdEncoding.DecodeString(state.VaultKey)
+	return output.Close()
 }
