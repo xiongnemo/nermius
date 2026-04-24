@@ -176,6 +176,36 @@ Behavior notes:
 - current-schema vaults use whole-vault encrypted records, so hostnames, usernames, labels, known-host payloads, and secrets are no longer stored as plaintext rows in SQLite.
 - `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault.
 
+### Moving A Vault To Another Machine
+
+The SQLite vault file is portable. The system keychain enrollment is not portable and must be recreated on each machine.
+
+1. On the old machine, find the vault path:
+
+   ```powershell
+   nermius vault keychain status
+   ```
+
+   The default path is usually `%APPDATA%\nermius\vault.db` on Windows, `~/Library/Application Support/nermius/vault.db` on macOS, and `~/.config/nermius/vault.db` on Linux.
+
+2. Copy `vault.db` to the new machine.
+
+3. On the new machine, either place it at the default path or pass it explicitly:
+
+   ```powershell
+   nermius --vault C:\path\to\vault.db vault keychain enable
+   ```
+
+4. Enter the master password once to enroll the copied vault into the new machine's keychain.
+
+After that, normal commands can auto-unlock through the new machine's keychain and fall back to the master password if needed.
+
+Notes:
+
+- imported private keys, passwords, identities, profiles, hosts, forwards, and vault-backed known hosts move with `vault.db`.
+- agent-backed auth still depends on the new machine's SSH agent.
+- external key file paths and `~/.ssh/known_hosts` file-backed entries are local machine state and must exist separately on the new machine.
+
 ## Known Hosts
 
 `nermius` no longer depends on the system `ssh` client for host key storage. By default, resolved hosts use `known_hosts.backend = vault+file`, which means:
