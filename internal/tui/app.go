@@ -75,7 +75,7 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 		},
 		records:        map[domain.DocumentKind][]store.DocumentSummary{},
 		filters:        map[domain.DocumentKind]string{},
-		status:         "a add | d detail | e edit | Del/x delete | / filter | Enter host connect | F2 back | F6 next | F8 close | F10 quit",
+		status:         "",
 		cursorBlinkOn:  true,
 		cursorBlinkAt:  time.Now().Add(500 * time.Millisecond),
 		lastMouseX:     -1,
@@ -372,7 +372,7 @@ func (a *App) render() {
 	} else {
 		a.renderList(w, h)
 	}
-	status := a.status
+	status := a.footerText()
 	if session := a.currentSession(); session != nil {
 		if offset := a.scrollOffsetForSession(session); offset > 0 {
 			status = fmt.Sprintf("[scrollback %d] %s", offset, status)
@@ -383,6 +383,32 @@ func (a *App) render() {
 		a.renderModal()
 	}
 	a.screen.Show()
+}
+
+func (a *App) footerText() string {
+	prompt := a.footerPrompt()
+	message := strings.TrimSpace(a.status)
+	if message == "" {
+		return prompt
+	}
+	if prompt == "" {
+		return message
+	}
+	return message + " | " + prompt
+}
+
+func (a *App) footerPrompt() string {
+	if a.inSessionTab() {
+		if len(a.sessions) == 0 {
+			return "click tabs/select | F2 back | q/F10 quit"
+		}
+		return "click tabs/sessions | wheel scrollback | drag select | Shift forces local mouse | Ctrl+Shift+C/V copy/paste | F2 back | F6 next | F8 close | q/F10 quit"
+	}
+	enterAction := "Enter detail"
+	if a.currentKind() == domain.KindHost {
+		enterAction = "Enter/double-click connect"
+	}
+	return "click tabs/select | a add | d detail | e edit | Del/x delete | / filter | r reload | " + enterAction + " | q/F10 quit"
 }
 
 func (a *App) renderList(w, h int) {
@@ -558,6 +584,7 @@ func (a *App) openSelectedHostSession(ctx context.Context) error {
 	}
 	a.sessions = append(a.sessions, session)
 	a.scrollToBottom(session)
+	a.status = ""
 	a.setActiveTab(len(a.tabs))
 	a.setActiveSession(len(a.sessions) - 1)
 	a.resetCursorBlink()

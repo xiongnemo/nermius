@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +168,34 @@ func TestListColumnWidthsShrinkIDBeforeLabel(t *testing.T) {
 	}
 	if labelWidth < 12 {
 		t.Fatalf("label width = %d, want at least 12", labelWidth)
+	}
+}
+
+func TestFooterPromptRefreshesForActiveView(t *testing.T) {
+	app := &App{
+		tabs:      []domain.DocumentKind{domain.KindHost, domain.KindIdentity},
+		activeTab: 0,
+	}
+	if got := app.footerText(); !strings.Contains(got, "Enter/double-click connect") {
+		t.Fatalf("host footer = %q, want connect prompt", got)
+	}
+
+	app.setActiveTab(1)
+	if got := app.footerText(); !strings.Contains(got, "Enter detail") {
+		t.Fatalf("identity footer = %q, want detail prompt", got)
+	}
+
+	app.sessions = []*service.EmbeddedSession{{Name: "test", Terminal: termemu.New(4, 2)}}
+	app.setActiveTab(len(app.tabs))
+	if got := app.footerText(); !strings.Contains(got, "wheel scrollback") {
+		t.Fatalf("session footer = %q, want session prompt", got)
+	}
+
+	app.status = "Connecting: dialing test"
+	app.setActiveTab(0)
+	got := app.footerText()
+	if !strings.Contains(got, "Connecting: dialing test") || !strings.Contains(got, "Enter/double-click connect") {
+		t.Fatalf("status footer = %q, want status plus refreshed host prompt", got)
 	}
 }
 

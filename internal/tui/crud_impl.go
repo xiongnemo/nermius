@@ -932,6 +932,7 @@ func (a *App) openHostSessionByID(ctx context.Context, id string) error {
 	}
 	a.sessions = append(a.sessions, session)
 	a.scrollToBottom(session)
+	a.status = ""
 	a.setActiveTab(len(a.tabs))
 	a.setActiveSession(len(a.sessions) - 1)
 	a.resetCursorBlink()
