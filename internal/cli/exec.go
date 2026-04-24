@@ -33,9 +33,10 @@ func (r *runtime) newExecCmd() *cobra.Command {
 				args[0],
 				joinExecCommand(args[1:]),
 				service.Prompts{
-					Text:    promptText,
-					Secret:  promptSecret,
-					Confirm: promptConfirm,
+					Text:     promptText,
+					Secret:   promptSecret,
+					Confirm:  promptConfirm,
+					Progress: cliProgress(r.verbose, cmd.ErrOrStderr()),
 				},
 				extraForwards,
 				os.Stdin,

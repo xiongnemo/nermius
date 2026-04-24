@@ -1180,6 +1180,10 @@ func (a *App) sessionPrompts(ctx context.Context) service.Prompts {
 		Confirm: func(label string) (bool, error) {
 			return a.promptConfirmModal(ctx, label)
 		},
+		Progress: func(message string) {
+			a.status = "Connecting: " + message
+			a.render()
+		},
 	}
 }
 

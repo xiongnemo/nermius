@@ -28,9 +28,10 @@ import (
 )
 
 type Prompts struct {
-	Text    func(label string) (string, error)
-	Secret  func(label string) (string, error)
-	Confirm func(label string) (bool, error)
+	Text     func(label string) (string, error)
+	Secret   func(label string) (string, error)
+	Confirm  func(label string) (bool, error)
+	Progress func(message string)
 }
 
 type CommandExitError struct {
@@ -81,6 +82,7 @@ func (c *Connector) ConnectInteractive(ctx context.Context, spec string, prompts
 
 	forwards := append([]domain.Forward{}, resolved.Forwards...)
 	forwards = append(forwards, extraForwards...)
+	reportProgress(prompts, "starting port forwards")
 	listenerClosers, err := c.startForwards(ctx, client, forwards)
 	if err != nil {
 		return err
@@ -105,6 +107,7 @@ func (c *Connector) ConnectInteractive(ctx context.Context, spec string, prompts
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
+	reportProgress(prompts, "requesting remote PTY")
 	if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
 		return err
 	}
@@ -122,9 +125,11 @@ func (c *Connector) ConnectInteractive(ctx context.Context, spec string, prompts
 	go c.watchConsoleResize(resizeCtx, 250*time.Millisecond, func(cols, rows int) {
 		_ = session.WindowChange(rows, cols)
 	})
+	reportProgress(prompts, "starting remote shell")
 	if err := session.Shell(); err != nil {
 		return err
 	}
+	reportProgress(prompts, "connected")
 	return session.Wait()
 }
 
@@ -141,6 +146,7 @@ func (c *Connector) Exec(ctx context.Context, spec, command string, prompts Prom
 
 	forwards := append([]domain.Forward{}, resolved.Forwards...)
 	forwards = append(forwards, extraForwards...)
+	reportProgress(prompts, "starting port forwards")
 	listenerClosers, err := c.startForwards(ctx, client, forwards)
 	if err != nil {
 		return err
@@ -156,6 +162,7 @@ func (c *Connector) Exec(ctx context.Context, spec, command string, prompts Prom
 	session.Stdin = stdin
 	session.Stdout = stdout
 	session.Stderr = stderr
+	reportProgress(prompts, "running remote command")
 	if err := session.Run(command); err != nil {
 		var exitErr *ssh.ExitError
 		if errors.As(err, &exitErr) {
@@ -171,6 +178,7 @@ func (c *Connector) OpenEmbeddedSession(ctx context.Context, spec string, prompt
 	if err != nil {
 		return nil, err
 	}
+	reportProgress(prompts, "starting port forwards")
 	listenerClosers, err := c.startForwards(ctx, client, resolved.Forwards)
 	if err != nil {
 		closeAll(cleanups)
@@ -214,11 +222,13 @@ func (c *Connector) OpenEmbeddedSession(ctx context.Context, spec string, prompt
 		client.Close()
 		return nil, err
 	}
+	reportProgress(prompts, "starting remote shell")
 	if err := session.Shell(); err != nil {
 		closeAll(cleanups)
 		client.Close()
 		return nil, err
 	}
+	reportProgress(prompts, "connected")
 	embedded := &EmbeddedSession{
 		Name:     resolved.Label,
 		Resolved: resolved,
@@ -295,10 +305,12 @@ func (s *EmbeddedSession) Close() error {
 }
 
 func (c *Connector) openClient(ctx context.Context, spec string, prompts Prompts) (domain.ResolvedConfig, *ssh.Client, []io.Closer, error) {
+	reportProgress(prompts, "resolving host "+spec)
 	resolved, err := c.Catalog.ResolveHost(ctx, spec)
 	if err != nil {
 		return domain.ResolvedConfig{}, nil, nil, err
 	}
+	reportProgress(prompts, fmt.Sprintf("resolved %s as %s:%d", resolved.Label, resolved.Hostname, resolved.Port))
 	prepared, err := c.prepareResolved(ctx, resolved, prompts)
 	if err != nil {
 		return domain.ResolvedConfig{}, nil, nil, err
@@ -312,6 +324,7 @@ func (c *Connector) openClient(ctx context.Context, spec string, prompts Prompts
 
 func (c *Connector) prepareResolved(ctx context.Context, resolved domain.ResolvedConfig, prompts Prompts) (domain.ResolvedConfig, error) {
 	if resolved.Username == "" && prompts.Text != nil {
+		reportProgress(prompts, "waiting for username")
 		value, err := prompts.Text("Username")
 		if err != nil {
 			return resolved, err
@@ -328,6 +341,7 @@ func (c *Connector) prepareResolved(ctx context.Context, resolved domain.Resolve
 }
 
 func (c *Connector) dialResolved(ctx context.Context, resolved domain.ResolvedConfig, prompts Prompts) (*ssh.Client, []io.Closer, error) {
+	reportProgress(prompts, "building SSH route")
 	chain, err := c.buildJumpChain(ctx, resolved, prompts)
 	if err != nil {
 		return nil, nil, err
@@ -335,6 +349,7 @@ func (c *Connector) dialResolved(ctx context.Context, resolved domain.ResolvedCo
 	var closers []io.Closer
 	var previous *ssh.Client
 	for idx, hop := range chain {
+		reportProgress(prompts, fmt.Sprintf("preparing SSH config for %s", hop.Label))
 		cfg, cfgClosers, err := c.buildClientConfig(ctx, hop, prompts)
 		if err != nil {
 			closeAll(closers)
@@ -345,6 +360,7 @@ func (c *Connector) dialResolved(ctx context.Context, resolved domain.ResolvedCo
 		}
 		closers = append(closers, cfgClosers...)
 		addr := net.JoinHostPort(hop.Hostname, strconv.Itoa(hop.Port))
+		reportProgress(prompts, fmt.Sprintf("dialing %s", addr))
 		var conn net.Conn
 		if idx == 0 {
 			conn, err = c.dialBase(ctx, hop, addr)
@@ -358,6 +374,7 @@ func (c *Connector) dialResolved(ctx context.Context, resolved domain.ResolvedCo
 			}
 			return nil, nil, err
 		}
+		reportProgress(prompts, fmt.Sprintf("performing SSH handshake with %s", addr))
 		clientConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 		if err != nil {
 			closeAll(closers)
@@ -367,6 +384,7 @@ func (c *Connector) dialResolved(ctx context.Context, resolved domain.ResolvedCo
 			return nil, nil, err
 		}
 		client := ssh.NewClient(clientConn, chans, reqs)
+		reportProgress(prompts, fmt.Sprintf("authenticated to %s", hop.Label))
 		closers = append(closers, client)
 		previous = client
 	}
@@ -379,6 +397,7 @@ func (c *Connector) dialResolved(ctx context.Context, resolved domain.ResolvedCo
 func (c *Connector) buildJumpChain(ctx context.Context, resolved domain.ResolvedConfig, prompts Prompts) ([]domain.ResolvedConfig, error) {
 	chain := make([]domain.ResolvedConfig, 0, len(resolved.Route.ProxyJump)+1)
 	for _, hop := range resolved.Route.ProxyJump {
+		reportProgress(prompts, "resolving jump host "+hop)
 		jump, err := c.resolveJumpSpec(ctx, hop, resolved, prompts)
 		if err != nil {
 			return nil, err
@@ -413,6 +432,7 @@ func (c *Connector) resolveJumpSpec(ctx context.Context, spec string, fallback d
 }
 
 func (c *Connector) buildClientConfig(ctx context.Context, resolved domain.ResolvedConfig, prompts Prompts) (*ssh.ClientConfig, []io.Closer, error) {
+	reportProgress(prompts, "loading auth methods for "+resolved.Label)
 	auths, err := c.buildAuthMethods(ctx, resolved, prompts)
 	if err != nil {
 		return nil, nil, err
@@ -421,6 +441,7 @@ func (c *Connector) buildClientConfig(ctx context.Context, resolved domain.Resol
 	callback := ssh.InsecureIgnoreHostKey()
 	closers := []io.Closer{}
 	if resolved.KnownHosts.Policy != domain.KnownHostsOff {
+		reportProgress(prompts, "loading known_hosts for "+resolved.Label)
 		verifier, err := prepareKnownHostsVerifier(ctx, c.Catalog, resolved, c.DefaultKnownHosts)
 		if err != nil {
 			return nil, nil, err
@@ -455,6 +476,7 @@ func (c *Connector) buildAuthMethods(ctx context.Context, resolved domain.Resolv
 				password = string(raw)
 			}
 			if password == "" && prompts.Secret != nil {
+				reportProgress(prompts, "waiting for SSH password")
 				value, err := prompts.Secret("Password")
 				if err != nil {
 					return nil, err
@@ -496,6 +518,7 @@ func (c *Connector) buildAuthMethods(ctx context.Context, resolved domain.Resolv
 }
 
 func (c *Connector) loadSigner(ctx context.Context, key *domain.Key, prompts Prompts) (ssh.Signer, error) {
+	reportProgress(prompts, "loading key "+key.Name)
 	var privateKey []byte
 	if key.PrivateKeySecretID != "" {
 		raw, err := c.Catalog.OpenSecret(ctx, key.PrivateKeySecretID)
@@ -531,6 +554,7 @@ func (c *Connector) loadSigner(ctx context.Context, key *domain.Key, prompts Pro
 	if prompts.Secret == nil {
 		return nil, err
 	}
+	reportProgress(prompts, "waiting for key passphrase")
 	value, promptErr := prompts.Secret(fmt.Sprintf("Passphrase for key %s", key.Name))
 	if promptErr != nil {
 		return nil, promptErr
@@ -553,12 +577,14 @@ func (c *Connector) hostKeyCallback(ctx context.Context, resolved domain.Resolve
 		}
 		switch cfg.Policy {
 		case domain.KnownHostsAcceptNew:
+			reportProgress(prompts, "saving new host key for "+knownHostPromptTarget(hostname))
 			c.logf(1, "accepting new host key %s for %s into %s", key.Type(), knownHostPromptTarget(hostname), cfg.WriteSource)
 			return verifier.Save(ctx, c.Catalog, hostname, remote, key)
 		case domain.KnownHostsStrict:
 			if prompts.Confirm == nil {
 				return err
 			}
+			reportProgress(prompts, "waiting for host-key trust confirmation")
 			message := fmt.Sprintf(
 				"Unknown host key for %s (%s)\nAlgorithm: %s\nFingerprint: %s\nTrust this host and add it to %s",
 				knownHostPromptTarget(hostname),
@@ -574,6 +600,7 @@ func (c *Connector) hostKeyCallback(ctx context.Context, resolved domain.Resolve
 			if !approved {
 				return errors.New("host key was not trusted")
 			}
+			reportProgress(prompts, "saving trusted host key for "+knownHostPromptTarget(hostname))
 			c.logf(1, "accepted new host key %s for %s into %s", key.Type(), knownHostPromptTarget(hostname), cfg.WriteSource)
 			return verifier.Save(ctx, c.Catalog, hostname, remote, key)
 		default:
@@ -922,6 +949,12 @@ func (c *Connector) logf(level int, format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "debug%d: %s\n", level, fmt.Sprintf(format, args...))
+}
+
+func reportProgress(prompts Prompts, message string) {
+	if prompts.Progress != nil && strings.TrimSpace(message) != "" {
+		prompts.Progress(message)
+	}
 }
 
 func consoleTerminalSize() (int, int) {

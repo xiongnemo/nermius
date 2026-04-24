@@ -108,6 +108,44 @@ func TestAcceptNewKnownHostsPersistsUnknownKeyToVaultByDefault(t *testing.T) {
 	}
 }
 
+func TestKnownHostCallbackReportsProgress(t *testing.T) {
+	ctx := context.Background()
+	pub := mustPublicKey(t)
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	connector := NewConnector(catalog, path)
+	resolved := domain.ResolvedConfig{
+		Hostname: "progress.example",
+		Port:     22,
+		KnownHosts: domain.KnownHostsConfig{
+			Policy:  domain.KnownHostsAcceptNew,
+			Backend: domain.KnownHostsBackendVault,
+		},
+	}
+	verifier := mustPrepareKnownHostsVerifier(t, ctx, catalog, resolved, path)
+	defer verifier.Close()
+
+	var progress []string
+	callback := connector.hostKeyCallback(ctx, resolved, Prompts{
+		Progress: func(message string) {
+			progress = append(progress, message)
+		},
+	}, verifier)
+
+	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.15"), Port: 22}
+	if err := callback("progress.example:22", remote, pub); err != nil {
+		t.Fatalf("callback returned error: %v", err)
+	}
+	if len(progress) == 0 {
+		t.Fatal("expected progress events")
+	}
+	if !strings.Contains(strings.Join(progress, "\n"), "saving new host key") {
+		t.Fatalf("expected known-host save progress, got %v", progress)
+	}
+}
+
 func TestStrictKnownHostsWithoutConfirmStillFailsOnUnknownKey(t *testing.T) {
 	ctx := context.Background()
 	pub := mustPublicKey(t)

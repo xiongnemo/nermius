@@ -770,9 +770,10 @@ func (r *runtime) newConnectCmd() *cobra.Command {
 				return err
 			}
 			return connector.ConnectInteractive(cmd.Context(), args[0], service.Prompts{
-				Text:    promptText,
-				Secret:  promptSecret,
-				Confirm: promptConfirm,
+				Text:     promptText,
+				Secret:   promptSecret,
+				Confirm:  promptConfirm,
+				Progress: cliProgress(r.verbose, cmd.ErrOrStderr()),
 			}, extraForwards)
 		},
 	}
@@ -822,6 +823,15 @@ func printJSON(value any) error {
 	}
 	_, err = os.Stdout.Write(append(raw, '\n'))
 	return err
+}
+
+func cliProgress(verbosity int, out io.Writer) func(string) {
+	if verbosity <= 0 {
+		return nil
+	}
+	return func(message string) {
+		fmt.Fprintf(out, "progress: %s\n", message)
+	}
 }
 
 func promptText(label string) (string, error) {
