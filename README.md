@@ -89,6 +89,7 @@ Inside the TUI object tabs:
 
 Inside the TUI session view:
 
+- connection prompts such as unknown host-key trust, password, username, and key passphrase stay inside the TUI as modals
 - use the mouse wheel to scroll local shell history
 - use `Shift+wheel` to force local scrollback when the remote app has mouse tracking enabled
 - drag to select visible terminal text, including locally scrolled shell history

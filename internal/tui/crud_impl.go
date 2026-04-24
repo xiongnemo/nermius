@@ -921,11 +921,7 @@ func (a *App) openHostSessionByID(ctx context.Context, id string) error {
 		return nil
 	}
 	w, h := a.screen.Size()
-	session, err := a.connector.OpenEmbeddedSession(ctx, id, service.Prompts{
-		Text:    promptTextScreen(a.screen),
-		Secret:  promptSecretScreen(a.screen),
-		Confirm: promptConfirmScreen(a.screen),
-	}, w, max(1, h-3))
+	session, err := a.connector.OpenEmbeddedSession(ctx, id, a.sessionPrompts(ctx), w, max(1, h-3))
 	if err != nil {
 		return err
 	}

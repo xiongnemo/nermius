@@ -83,6 +83,56 @@ func TestOpenDeleteConfirmBlocksReferencedObject(t *testing.T) {
 	}
 }
 
+func TestPromptConfirmModalUsesTUIScreenEvents(t *testing.T) {
+	app, cleanup := newTestAppWithCatalog(t)
+	defer cleanup()
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	defer screen.Fini()
+	app.screen = screen
+	app.events = make(chan tcell.Event, 4)
+	app.events <- tcell.NewEventKey(tcell.KeyRune, 'y', tcell.ModNone)
+
+	approved, err := app.promptConfirmModal(context.Background(), "Trust this host and add it to vault?")
+	if err != nil {
+		t.Fatalf("promptConfirmModal returned error: %v", err)
+	}
+	if !approved {
+		t.Fatal("expected prompt to be approved")
+	}
+	if app.hasModal() {
+		t.Fatal("expected prompt modal to close")
+	}
+}
+
+func TestPromptTextModalUsesTUIScreenEvents(t *testing.T) {
+	app, cleanup := newTestAppWithCatalog(t)
+	defer cleanup()
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	defer screen.Fini()
+	app.screen = screen
+	app.events = make(chan tcell.Event, 4)
+	app.events <- tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModNone)
+	app.events <- tcell.NewEventKey(tcell.KeyRune, 'e', tcell.ModNone)
+	app.events <- tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)
+
+	value, err := app.promptTextModal(context.Background(), "Username", false)
+	if err != nil {
+		t.Fatalf("promptTextModal returned error: %v", err)
+	}
+	if value != "ne" {
+		t.Fatalf("expected input %q, got %q", "ne", value)
+	}
+	if app.hasModal() {
+		t.Fatal("expected prompt modal to close")
+	}
+}
+
 func newTestAppWithCatalog(t *testing.T) (*App, func()) {
 	t.Helper()
 	paths := testPaths(t)

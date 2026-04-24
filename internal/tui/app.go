@@ -1,17 +1,13 @@
 package tui
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"golang.org/x/term"
 
 	"github.com/nermius/nermius/internal/clipboard"
 	"github.com/nermius/nermius/internal/config"
@@ -25,6 +21,7 @@ type App struct {
 	catalog   *service.Catalog
 	connector *service.Connector
 	screen    tcell.Screen
+	events    chan tcell.Event
 	clipboard clipboard.Adapter
 	paths     config.Paths
 
@@ -95,6 +92,7 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 
 func (a *App) loop(ctx context.Context) error {
 	events := make(chan tcell.Event, 16)
+	a.events = events
 	go func() {
 		for {
 			events <- a.screen.PollEvent()
@@ -549,11 +547,7 @@ func (a *App) openSelectedHostSession(ctx context.Context) error {
 		return nil
 	}
 	w, h := a.screen.Size()
-	session, err := a.connector.OpenEmbeddedSession(ctx, record.ID, service.Prompts{
-		Text:    promptTextScreen(a.screen),
-		Secret:  promptSecretScreen(a.screen),
-		Confirm: promptConfirmScreen(a.screen),
-	}, w, max(1, h-3))
+	session, err := a.connector.OpenEmbeddedSession(ctx, record.ID, a.sessionPrompts(ctx), w, max(1, h-3))
 	if err != nil {
 		return err
 	}
@@ -1175,59 +1169,133 @@ func isCtrlShiftRune(ev *tcell.EventKey, want rune) bool {
 	return strings.EqualFold(string(ev.Rune()), string(want))
 }
 
-func promptTextScreen(screen tcell.Screen) func(string) (string, error) {
-	return func(label string) (string, error) {
-		screen.Fini()
-		defer reinitScreen(screen)
-		fmt.Fprintf(os.Stderr, "%s: ", label)
-		return readScreenPromptLine()
+func (a *App) sessionPrompts(ctx context.Context) service.Prompts {
+	return service.Prompts{
+		Text: func(label string) (string, error) {
+			return a.promptTextModal(ctx, label, false)
+		},
+		Secret: func(label string) (string, error) {
+			return a.promptTextModal(ctx, label, true)
+		},
+		Confirm: func(label string) (bool, error) {
+			return a.promptConfirmModal(ctx, label)
+		},
 	}
 }
 
-func promptSecretScreen(screen tcell.Screen) func(string) (string, error) {
-	return func(label string) (string, error) {
-		screen.Fini()
-		defer reinitScreen(screen)
-		fmt.Fprintf(os.Stderr, "%s: ", label)
-		value, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stderr)
-		return strings.TrimSpace(string(value)), err
+func (a *App) promptTextModal(ctx context.Context, label string, secret bool) (string, error) {
+	if a.events == nil {
+		return "", errors.New("TUI prompt event loop is unavailable")
 	}
-}
-
-func promptConfirmScreen(screen tcell.Screen) func(string) (bool, error) {
-	return func(label string) (bool, error) {
-		screen.Fini()
-		defer reinitScreen(screen)
-		for {
-			fmt.Fprintf(os.Stderr, "%s [y/N]: ", label)
-			value, err := readScreenPromptLine()
-			if err != nil {
-				return false, err
-			}
-			switch strings.ToLower(value) {
-			case "y", "yes":
-				return true, nil
-			case "", "n", "no":
-				return false, nil
-			default:
-				fmt.Fprintln(os.Stderr, "Please answer y or n.")
-			}
-		}
-	}
-}
-
-func readScreenPromptLine() (string, error) {
-	reader := bufio.NewReader(os.Stdin)
-	value, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	var (
+		value string
+		saved bool
+	)
+	a.pushModal(modalState{
+		kind: modalKindTextInput,
+		textInput: newTextInputModal(label, "", false, secret, func(app *App, input string) {
+			value = input
+			saved = true
+		}),
+	})
+	if err := a.runBlockingPromptLoop(ctx); err != nil {
 		return "", err
+	}
+	if !saved {
+		return "", errors.New("prompt canceled")
 	}
 	return strings.TrimSpace(value), nil
 }
 
-func reinitScreen(screen tcell.Screen) {
-	_ = screen.Init()
-	screen.EnableMouse(tcell.MouseMotionEvents)
-	screen.EnableFocus()
+func (a *App) promptConfirmModal(ctx context.Context, label string) (bool, error) {
+	if a.events == nil {
+		return false, errors.New("TUI prompt event loop is unavailable")
+	}
+	approved := false
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Confirm",
+			lines: append(wrapModalLines(label, 68), "", "Approve?"),
+			onConfirm: func(ctx context.Context, app *App) error {
+				approved = true
+				return nil
+			},
+		},
+	})
+	if err := a.runBlockingPromptLoop(ctx); err != nil {
+		return false, err
+	}
+	return approved, nil
+}
+
+func (a *App) runBlockingPromptLoop(ctx context.Context) error {
+	startDepth := len(a.modals)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for len(a.modals) >= startDepth {
+		a.render()
+		select {
+		case <-ctx.Done():
+			for len(a.modals) >= startDepth {
+				a.popModal()
+			}
+			return ctx.Err()
+		case <-tick.C:
+			now := time.Now()
+			if !now.Before(a.cursorBlinkAt) {
+				a.cursorBlinkOn = !a.cursorBlinkOn
+				a.cursorBlinkAt = now.Add(500 * time.Millisecond)
+			}
+			a.collectSessionUpdates()
+		case ev := <-a.events:
+			if err := a.handlePromptEvent(ctx, ev); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) handlePromptEvent(ctx context.Context, ev tcell.Event) error {
+	switch event := ev.(type) {
+	case *tcell.EventResize:
+		a.screen.Sync()
+		if a.inSessionTab() && a.activeSession < len(a.sessions) {
+			w, h := a.screen.Size()
+			_ = a.sessions[a.activeSession].Resize(w, max(1, h-3))
+		}
+	case *tcell.EventFocus:
+		a.setFocused(event.Focused)
+	case *tcell.EventKey:
+		if done, err := a.handleModalKey(ctx, event); done || err != nil {
+			return err
+		}
+	case *tcell.EventMouse:
+		if done, err := a.handleModalMouse(ctx, event); done || err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func wrapModalLines(text string, width int) []string {
+	var out []string
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			out = append(out, "")
+			continue
+		}
+		for len(line) > width {
+			cut := strings.LastIndex(line[:width], " ")
+			if cut <= 0 {
+				cut = width
+			}
+			out = append(out, strings.TrimSpace(line[:cut]))
+			line = strings.TrimSpace(line[cut:])
+		}
+		out = append(out, line)
+	}
+	return out
 }
