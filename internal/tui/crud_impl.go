@@ -950,6 +950,9 @@ func (a *App) forwardRuntimeDetailLines(id string, forward *domain.Forward) []st
 		"Runtime:",
 		"  status: " + status,
 	}
+	if reason := a.forwardReasonDisplay(id); reason != "" {
+		lines = append(lines, "  reason: "+reason)
+	}
 	if started != "" {
 		lines = append(lines, "  started_at: "+started)
 	}

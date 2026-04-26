@@ -163,18 +163,28 @@ func TestForwardStatusDisplay(t *testing.T) {
 	app := &App{
 		runningForwards: map[string]*forwardRuntime{
 			"forward-running": {status: forwardStatusRunning},
-			"forward-error":   {status: forwardStatusError, lastError: "listen failed"},
-			"forward-retry":   {status: forwardStatusReconnecting, attempts: 2},
+			"forward-error":   {status: forwardStatusError, reason: "listen failed"},
+			"forward-retry":   {status: forwardStatusReconnecting, attempts: 2, reason: "network reset"},
+			"forward-manual":  {status: forwardStatusStopped, reason: "stopped by user"},
 		},
 	}
 	if got, _ := app.forwardStatusDisplay("forward-running"); got != "running" {
 		t.Fatalf("running status = %q", got)
 	}
-	if got, _ := app.forwardStatusDisplay("forward-error"); got != "error: listen failed" {
+	if got, _ := app.forwardStatusDisplay("forward-error"); got != "error" {
 		t.Fatalf("error status = %q", got)
+	}
+	if got := app.forwardReasonDisplay("forward-error"); got != "listen failed" {
+		t.Fatalf("error reason = %q", got)
 	}
 	if got, _ := app.forwardStatusDisplay("forward-retry"); got != "reconnecting 2/5" {
 		t.Fatalf("reconnecting status = %q", got)
+	}
+	if got := app.forwardReasonDisplay("forward-retry"); got != "network reset" {
+		t.Fatalf("reconnecting reason = %q", got)
+	}
+	if got := app.forwardReasonDisplay("forward-manual"); got != "stopped by user" {
+		t.Fatalf("manual stop reason = %q", got)
 	}
 	if got, _ := app.forwardStatusDisplay("forward-stopped"); got != "stopped" {
 		t.Fatalf("stopped status = %q", got)
