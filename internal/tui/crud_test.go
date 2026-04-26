@@ -159,23 +159,28 @@ func TestNewForwardFormDefaultsToLocalWithTargetFields(t *testing.T) {
 	}
 }
 
-func TestForwardRecordLabelIncludesRuntimeState(t *testing.T) {
+func TestForwardStatusDisplay(t *testing.T) {
 	app := &App{
-		runningForwards: map[string]*service.RunningForward{
-			"forward-running": {},
+		runningForwards: map[string]*forwardRuntime{
+			"forward-running": {status: forwardStatusRunning},
+			"forward-error":   {status: forwardStatusError, lastError: "listen failed"},
+			"forward-retry":   {status: forwardStatusReconnecting, attempts: 2},
 		},
-		forwardErrors: map[string]string{
-			"forward-error": "listen failed",
-		},
 	}
-	if got := app.displayRecordLabel(domain.KindForward, store.DocumentSummary{ID: "forward-running", Label: "db"}); got != "[running] db" {
-		t.Fatalf("running label = %q", got)
+	if got, _ := app.forwardStatusDisplay("forward-running"); got != "running" {
+		t.Fatalf("running status = %q", got)
 	}
-	if got := app.displayRecordLabel(domain.KindForward, store.DocumentSummary{ID: "forward-error", Label: "api"}); got != "[error] api" {
-		t.Fatalf("error label = %q", got)
+	if got, _ := app.forwardStatusDisplay("forward-error"); got != "error: listen failed" {
+		t.Fatalf("error status = %q", got)
 	}
-	if got := app.displayRecordLabel(domain.KindForward, store.DocumentSummary{ID: "forward-stopped", Label: "socks"}); got != "[stopped] socks" {
-		t.Fatalf("stopped label = %q", got)
+	if got, _ := app.forwardStatusDisplay("forward-retry"); got != "reconnecting 2/5" {
+		t.Fatalf("reconnecting status = %q", got)
+	}
+	if got, _ := app.forwardStatusDisplay("forward-stopped"); got != "stopped" {
+		t.Fatalf("stopped status = %q", got)
+	}
+	if got := app.displayRecordLabel(domain.KindForward, store.DocumentSummary{ID: "forward-running", Label: "db"}); got != "db" {
+		t.Fatalf("forward label = %q", got)
 	}
 }
 
@@ -188,13 +193,15 @@ func newTestAppWithCatalog(t *testing.T) (*App, func()) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	app := &App{
-		catalog:  service.NewCatalog(db, []byte("01234567890123456789012345678901")),
-		paths:    paths,
-		tabs:     []domain.DocumentKind{domain.KindHost, domain.KindGroup, domain.KindProfile, domain.KindIdentity, domain.KindKey, domain.KindForward, domain.KindKnownHost},
-		records:  map[domain.DocumentKind][]store.DocumentSummary{},
-		filters:  map[domain.DocumentKind]string{},
-		modals:   nil,
-		sessions: nil,
+		catalog:         service.NewCatalog(db, []byte("01234567890123456789012345678901")),
+		paths:           paths,
+		tabs:            []domain.DocumentKind{domain.KindHost, domain.KindGroup, domain.KindProfile, domain.KindIdentity, domain.KindKey, domain.KindForward, domain.KindKnownHost},
+		records:         map[domain.DocumentKind][]store.DocumentSummary{},
+		filters:         map[domain.DocumentKind]string{},
+		hostAddresses:   map[string]string{},
+		runningForwards: map[string]*forwardRuntime{},
+		modals:          nil,
+		sessions:        nil,
 	}
 	return app, func() {
 		_ = db.Close()

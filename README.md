@@ -89,7 +89,7 @@ Inside the TUI object tabs:
 - `Delete` or `x` opens delete confirmation; referenced objects are blocked and show who still depends on them
 - `/` opens a filter prompt for the current tab, and `r` reloads the lists
 - reference fields use searchable pickers, and ordered lists such as profiles, forwards, known-host host patterns, and identity auth methods use a dedicated list editor
-- `FORWARD` objects are reusable `-L`/`-R`/`-D` tunnel definitions with their own Host picker; `Enter` or `Space` starts/stops the selected tunnel for the lifetime of the current TUI process
+- `FORWARD` objects are reusable `-L`/`-R`/`-D` tunnel definitions with their own Host picker; `Enter` or `Space` starts/stops the selected tunnel for the lifetime of the current TUI process, and the list shows `running`, `stopped`, `error`, or `reconnecting n/5`
 
 Inside the TUI session view:
 
@@ -264,7 +264,7 @@ nermius forward add -it
 nermius forward start prod-db
 ```
 
-`forward start` runs in the foreground and keeps the tunnel open until `Ctrl+C`. TUI `FORWARD` toggles are also process-local; they close when the TUI exits. Saved `Host/Profile.forward_ids` remain visible in resolved config for organization and inspection, but saved forwards no longer auto-start when opening a shell. One-time CLI forwards still work with `connect`/`exec`:
+`forward start` runs in the foreground and keeps the tunnel open until `Ctrl+C`. If an established tunnel disconnects unexpectedly, Nermius retries up to 5 times before surfacing the final error. TUI `FORWARD` toggles are also process-local; they close when the TUI exits. Saved `Host/Profile.forward_ids` remain visible in resolved config for organization and inspection, but saved forwards no longer auto-start when opening a shell. One-time CLI forwards still work with `connect`/`exec`:
 
 ```powershell
 nermius connect my-host -L 15432:db.internal:5432

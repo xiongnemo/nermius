@@ -171,6 +171,16 @@ func TestListColumnWidthsShrinkIDBeforeLabel(t *testing.T) {
 	}
 }
 
+func TestHostAddressLabelDefaultsPort(t *testing.T) {
+	if got := hostAddressLabel(domain.Host{Hostname: "db.internal"}); got != "db.internal:22" {
+		t.Fatalf("host address = %q, want default port 22", got)
+	}
+	port := 2200
+	if got := hostAddressLabel(domain.Host{Hostname: "db.internal", Port: &port}); got != "db.internal:2200" {
+		t.Fatalf("host address = %q, want explicit port", got)
+	}
+}
+
 func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 	app := &App{
 		tabs:      []domain.DocumentKind{domain.KindHost, domain.KindIdentity},

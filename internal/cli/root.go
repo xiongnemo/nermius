@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -722,28 +723,65 @@ func (r *runtime) newForwardStartCmd() *cobra.Command {
 			connector.Verbosity = r.verbose
 			runCtx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()
-			running, err := connector.StartForward(runCtx, args[0], service.Prompts{
+			prompts := service.Prompts{
 				Text:     promptText,
 				Secret:   promptSecret,
 				Confirm:  promptConfirm,
 				Progress: cliProgress(r.verbose, cmd.ErrOrStderr()),
-			})
-			if err != nil {
-				return err
 			}
-			defer running.Close()
-			if _, err := fmt.Fprintln(cmd.OutOrStdout(), describeRunningForward(running)); err != nil {
-				return err
-			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Press Ctrl+C to stop.")
-			select {
-			case err := <-running.Done():
-				return err
-			case <-runCtx.Done():
-				_ = running.Close()
-				return nil
+			for attempt := 0; ; {
+				running, err := connector.StartForward(runCtx, args[0], prompts)
+				if err != nil {
+					if attempt == 0 || attempt >= service.MaxForwardReconnectAttempts {
+						return err
+					}
+					attempt++
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Reconnect failed: %v; reconnecting %d/%d...\n", err, attempt, service.MaxForwardReconnectAttempts)
+					if !sleepContext(runCtx, service.ForwardReconnectDelay(attempt)) {
+						return nil
+					}
+					continue
+				}
+				attempt = 0
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), describeRunningForward(running)); err != nil {
+					_ = running.Close()
+					return err
+				}
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Press Ctrl+C to stop.")
+				select {
+				case err := <-running.Done():
+					if runCtx.Err() != nil {
+						return nil
+					}
+					if err == nil {
+						err = errors.New("forward connection closed")
+					}
+					if attempt >= service.MaxForwardReconnectAttempts {
+						return err
+					}
+					attempt++
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Forward disconnected: %v; reconnecting %d/%d...\n", err, attempt, service.MaxForwardReconnectAttempts)
+					if !sleepContext(runCtx, service.ForwardReconnectDelay(attempt)) {
+						_ = running.Close()
+						return nil
+					}
+				case <-runCtx.Done():
+					_ = running.Close()
+					return nil
+				}
 			}
 		},
+	}
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

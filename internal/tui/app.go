@@ -30,10 +30,10 @@ type App struct {
 	cursor           int
 	records          map[domain.DocumentKind][]store.DocumentSummary
 	filters          map[domain.DocumentKind]string
+	hostAddresses    map[string]string
 	sessions         []*service.EmbeddedSession
 	activeSession    int
-	runningForwards  map[string]*service.RunningForward
-	forwardErrors    map[string]string
+	runningForwards  map[string]*forwardRuntime
 	status           string
 	cursorBlinkOn    bool
 	cursorBlinkAt    time.Time
@@ -47,6 +47,37 @@ type App struct {
 	selection        sessionSelection
 	scrollOffsets    map[*service.EmbeddedSession]int
 	modals           []modalState
+}
+
+type forwardRuntimeStatus string
+
+const (
+	forwardStatusConnecting   forwardRuntimeStatus = "connecting"
+	forwardStatusRunning      forwardRuntimeStatus = "running"
+	forwardStatusReconnecting forwardRuntimeStatus = "reconnecting"
+	forwardStatusError        forwardRuntimeStatus = "error"
+)
+
+type forwardRuntime struct {
+	running   *service.RunningForward
+	cancel    context.CancelFunc
+	status    forwardRuntimeStatus
+	attempts  int
+	lastError string
+	started   time.Time
+	stopping  bool
+}
+
+func (rt *forwardRuntime) active() bool {
+	if rt == nil {
+		return false
+	}
+	switch rt.status {
+	case forwardStatusConnecting, forwardStatusRunning, forwardStatusReconnecting:
+		return true
+	default:
+		return false
+	}
 }
 
 func Run(ctx context.Context, catalog *service.Catalog, connector *service.Connector, paths config.Paths) error {
@@ -77,8 +108,8 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 		},
 		records:         map[domain.DocumentKind][]store.DocumentSummary{},
 		filters:         map[domain.DocumentKind]string{},
-		runningForwards: map[string]*service.RunningForward{},
-		forwardErrors:   map[string]string{},
+		hostAddresses:   map[string]string{},
+		runningForwards: map[string]*forwardRuntime{},
 		status:          "",
 		cursorBlinkOn:   true,
 		cursorBlinkAt:   time.Now().Add(500 * time.Millisecond),
@@ -324,12 +355,27 @@ func (a *App) reload(ctx context.Context) error {
 		}
 		a.records[kind] = items
 	}
+	a.refreshHostAddresses(ctx)
 	if current := a.currentRecords(); len(current) == 0 {
 		a.cursor = 0
 	} else if a.cursor >= len(current) {
 		a.cursor = len(current) - 1
 	}
 	return nil
+}
+
+func (a *App) refreshHostAddresses(ctx context.Context) {
+	a.hostAddresses = map[string]string{}
+	if a.catalog == nil {
+		return
+	}
+	for _, item := range a.records[domain.KindHost] {
+		host, err := a.catalog.GetHost(ctx, item.ID)
+		if err != nil || host == nil {
+			continue
+		}
+		a.hostAddresses[item.ID] = hostAddressLabel(*host)
+	}
 }
 
 func (a *App) handleListMouse(ctx context.Context, y int, buttons, prevButtons tcell.ButtonMask) {
@@ -430,6 +476,14 @@ func (a *App) footerPrompt() string {
 }
 
 func (a *App) renderList(w, h int) {
+	switch a.currentKind() {
+	case domain.KindHost:
+		a.renderHostList(w, h)
+		return
+	case domain.KindForward:
+		a.renderForwardList(w, h)
+		return
+	}
 	items := a.currentRecords()
 	idWidth, labelWidth, updatedWidth := listColumnWidths(w, items)
 	header := formatListRow("ID", "LABEL", "UPDATED", idWidth, labelWidth, updatedWidth)
@@ -445,18 +499,41 @@ func (a *App) renderList(w, h int) {
 	}
 }
 
+func (a *App) renderHostList(w, h int) {
+	items := a.currentRecords()
+	idWidth, addressWidth, labelWidth, updatedWidth := hostListColumnWidths(w, items, a.hostAddresses)
+	header := formatHostListRow("ID", "ADDRESS", "LABEL", "UPDATED", idWidth, addressWidth, labelWidth, updatedWidth)
+	drawText(a.screen, 0, 1, tcell.StyleDefault.Foreground(tcell.ColorYellow), truncate(header, w))
+	for i := 0; i < h-3 && i < len(items); i++ {
+		item := items[i]
+		style := tcell.StyleDefault
+		if i == a.cursor {
+			style = style.Background(tcell.ColorDarkSlateGray)
+		}
+		line := formatHostListRow(item.ID, a.hostAddresses[item.ID], item.Label, item.UpdatedAt.Format(time.RFC3339), idWidth, addressWidth, labelWidth, updatedWidth)
+		drawText(a.screen, 0, 2+i, style, truncate(line, w))
+	}
+}
+
+func (a *App) renderForwardList(w, h int) {
+	items := a.currentRecords()
+	idWidth, statusWidth, labelWidth, updatedWidth := forwardListColumnWidths(w, items, a)
+	header := formatForwardListRow("ID", "STATUS", "LABEL", "UPDATED", idWidth, statusWidth, labelWidth, updatedWidth)
+	drawText(a.screen, 0, 1, tcell.StyleDefault.Foreground(tcell.ColorYellow), truncate(header, w))
+	for i := 0; i < h-3 && i < len(items); i++ {
+		item := items[i]
+		selected := i == a.cursor
+		statusText, statusColor := a.forwardStatusDisplay(item.ID)
+		x := 0
+		x = drawListColumn(a.screen, x, 2+i, item.ID, idWidth, tcell.ColorDefault, selected)
+		x = drawListColumn(a.screen, x, 2+i, statusText, statusWidth, statusColor, selected)
+		x = drawListColumn(a.screen, x, 2+i, item.Label, labelWidth, tcell.ColorDefault, selected)
+		drawListColumn(a.screen, x, 2+i, item.UpdatedAt.Format(time.RFC3339), updatedWidth, tcell.ColorDefault, selected)
+	}
+}
+
 func (a *App) displayRecordLabel(kind domain.DocumentKind, item store.DocumentSummary) string {
-	if kind != domain.KindForward {
-		return item.Label
-	}
-	switch {
-	case a.runningForwards != nil && a.runningForwards[item.ID] != nil:
-		return "[running] " + item.Label
-	case a.forwardErrors != nil && a.forwardErrors[item.ID] != "":
-		return "[error] " + item.Label
-	default:
-		return "[stopped] " + item.Label
-	}
+	return item.Label
 }
 
 func (a *App) renderSessions(w, h int) {
@@ -570,17 +647,8 @@ func (a *App) collectSessionUpdates() {
 }
 
 func (a *App) collectForwardUpdates() {
-	for id, running := range a.runningForwards {
-		select {
-		case err := <-running.Done():
-			delete(a.runningForwards, id)
-			if err != nil {
-				a.forwardErrors[id] = err.Error()
-				a.status = err.Error()
-			}
-		default:
-		}
-	}
+	// Forward lifecycle updates are owned by the watcher goroutine created by
+	// toggleSelectedForward. The ticker still re-renders status changes.
 }
 
 func (a *App) currentKind() domain.DocumentKind {
@@ -643,36 +711,121 @@ func (a *App) toggleSelectedForward(ctx context.Context) error {
 		return nil
 	}
 	if a.runningForwards == nil {
-		a.runningForwards = map[string]*service.RunningForward{}
+		a.runningForwards = map[string]*forwardRuntime{}
 	}
-	if a.forwardErrors == nil {
-		a.forwardErrors = map[string]string{}
-	}
-	if running := a.runningForwards[record.ID]; running != nil {
-		if err := running.Close(); err != nil {
-			a.forwardErrors[record.ID] = err.Error()
-			return err
+	if runtime := a.runningForwards[record.ID]; runtime != nil && runtime.active() {
+		runtime.stopping = true
+		if runtime.cancel != nil {
+			runtime.cancel()
+		}
+		if runtime.running != nil {
+			_ = runtime.running.Close()
 		}
 		delete(a.runningForwards, record.ID)
-		delete(a.forwardErrors, record.ID)
 		a.status = fmt.Sprintf("Stopped forward %q.", record.Label)
 		return nil
 	}
-	delete(a.forwardErrors, record.ID)
-	running, err := a.connector.StartForward(ctx, record.ID, a.sessionPrompts(ctx))
+
+	if runtime := a.runningForwards[record.ID]; runtime != nil {
+		runtime.stopping = true
+		if runtime.cancel != nil {
+			runtime.cancel()
+		}
+		delete(a.runningForwards, record.ID)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	runtime := &forwardRuntime{
+		cancel: cancel,
+		status: forwardStatusConnecting,
+	}
+	a.runningForwards[record.ID] = runtime
+	running, err := a.connector.StartForward(runCtx, record.ID, a.sessionPrompts(ctx))
 	if err != nil {
-		a.forwardErrors[record.ID] = err.Error()
+		cancel()
+		runtime.status = forwardStatusError
+		runtime.lastError = err.Error()
 		return err
 	}
-	a.runningForwards[record.ID] = running
+	runtime.running = running
+	runtime.started = running.Started
+	runtime.status = forwardStatusRunning
 	a.status = fmt.Sprintf("Started forward %q.", record.Label)
+	go a.watchForward(record.ID, record.Label, runCtx, runtime)
 	return nil
 }
 
 func (a *App) closeRunningForwards() {
-	for id, running := range a.runningForwards {
-		_ = running.Close()
+	for id, runtime := range a.runningForwards {
+		runtime.stopping = true
+		if runtime.cancel != nil {
+			runtime.cancel()
+		}
+		if runtime.running != nil {
+			_ = runtime.running.Close()
+		}
 		delete(a.runningForwards, id)
+	}
+}
+
+func (a *App) watchForward(id, label string, ctx context.Context, runtime *forwardRuntime) {
+	for {
+		if runtime.running == nil {
+			return
+		}
+		err := <-runtime.running.Done()
+		if runtime.stopping || ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			err = errors.New("forward connection closed")
+		}
+		runtime.running = nil
+		runtime.lastError = err.Error()
+		for attempt := 1; attempt <= service.MaxForwardReconnectAttempts; attempt++ {
+			runtime.status = forwardStatusReconnecting
+			runtime.attempts = attempt
+			a.status = fmt.Sprintf("Forward %q disconnected: %v; reconnecting %d/%d.", label, err, attempt, service.MaxForwardReconnectAttempts)
+			if !sleepContext(ctx, service.ForwardReconnectDelay(attempt)) {
+				return
+			}
+			next, reconnectErr := a.connector.StartForward(ctx, id, a.backgroundForwardPrompts())
+			if reconnectErr == nil {
+				runtime.running = next
+				runtime.started = next.Started
+				runtime.status = forwardStatusRunning
+				runtime.attempts = 0
+				runtime.lastError = ""
+				a.status = fmt.Sprintf("Reconnected forward %q.", label)
+				break
+			}
+			runtime.lastError = reconnectErr.Error()
+			err = reconnectErr
+		}
+		if runtime.running == nil {
+			runtime.status = forwardStatusError
+			runtime.attempts = service.MaxForwardReconnectAttempts
+			a.status = fmt.Sprintf("Forward %q stopped after %d reconnect attempts: %s", label, service.MaxForwardReconnectAttempts, runtime.lastError)
+			return
+		}
+	}
+}
+
+func (a *App) backgroundForwardPrompts() service.Prompts {
+	return service.Prompts{
+		Progress: func(message string) {
+			a.status = message
+		},
+	}
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -1080,6 +1233,118 @@ func formatListRow(id, label, updated string, idWidth, labelWidth, updatedWidth 
 		labelWidth, truncate(label, labelWidth),
 		updatedWidth, truncate(updated, updatedWidth),
 	)
+}
+
+func hostListColumnWidths(totalWidth int, items []store.DocumentSummary, addresses map[string]string) (int, int, int, int) {
+	const (
+		columnGap        = 2
+		defaultIDWidth   = 36
+		minIDWidth       = 12
+		minAddressWidth  = 12
+		minLabelWidth    = 12
+		defaultTimeWidth = 20
+		maxAddressWidth  = 36
+	)
+	updatedWidth := max(len("UPDATED"), defaultTimeWidth)
+	addressWidth := minAddressWidth
+	for _, item := range items {
+		updatedWidth = max(updatedWidth, len(item.UpdatedAt.Format(time.RFC3339)))
+		addressWidth = max(addressWidth, len(addresses[item.ID]))
+	}
+	addressWidth = min(maxAddressWidth, max(addressWidth, len("ADDRESS")))
+	if totalWidth <= 0 {
+		return minIDWidth, minAddressWidth, minLabelWidth, updatedWidth
+	}
+	maxIDWidth := totalWidth - addressWidth - updatedWidth - columnGap*3 - minLabelWidth
+	idWidth := min(defaultIDWidth, max(minIDWidth, maxIDWidth))
+	labelWidth := max(minLabelWidth, totalWidth-idWidth-addressWidth-updatedWidth-columnGap*3)
+	return idWidth, addressWidth, labelWidth, updatedWidth
+}
+
+func formatHostListRow(id, address, label, updated string, idWidth, addressWidth, labelWidth, updatedWidth int) string {
+	return fmt.Sprintf(
+		"%-*s  %-*s  %-*s  %-*s",
+		idWidth, truncate(id, idWidth),
+		addressWidth, truncate(address, addressWidth),
+		labelWidth, truncate(label, labelWidth),
+		updatedWidth, truncate(updated, updatedWidth),
+	)
+}
+
+func forwardListColumnWidths(totalWidth int, items []store.DocumentSummary, app *App) (int, int, int, int) {
+	const (
+		columnGap        = 2
+		defaultIDWidth   = 36
+		minIDWidth       = 12
+		minStatusWidth   = 10
+		minLabelWidth    = 12
+		defaultTimeWidth = 20
+		maxStatusWidth   = 56
+	)
+	updatedWidth := max(len("UPDATED"), defaultTimeWidth)
+	statusWidth := minStatusWidth
+	for _, item := range items {
+		updatedWidth = max(updatedWidth, len(item.UpdatedAt.Format(time.RFC3339)))
+		statusText, _ := app.forwardStatusDisplay(item.ID)
+		statusWidth = max(statusWidth, len(statusText))
+	}
+	statusWidth = min(maxStatusWidth, max(statusWidth, len("STATUS")))
+	if totalWidth <= 0 {
+		return minIDWidth, minStatusWidth, minLabelWidth, updatedWidth
+	}
+	maxIDWidth := totalWidth - statusWidth - updatedWidth - columnGap*3 - minLabelWidth
+	idWidth := min(defaultIDWidth, max(minIDWidth, maxIDWidth))
+	labelWidth := max(minLabelWidth, totalWidth-idWidth-statusWidth-updatedWidth-columnGap*3)
+	return idWidth, statusWidth, labelWidth, updatedWidth
+}
+
+func formatForwardListRow(id, status, label, updated string, idWidth, statusWidth, labelWidth, updatedWidth int) string {
+	return fmt.Sprintf(
+		"%-*s  %-*s  %-*s  %-*s",
+		idWidth, truncate(id, idWidth),
+		statusWidth, truncate(status, statusWidth),
+		labelWidth, truncate(label, labelWidth),
+		updatedWidth, truncate(updated, updatedWidth),
+	)
+}
+
+func drawListColumn(screen tcell.Screen, x, y int, value string, width int, foreground tcell.Color, selected bool) int {
+	style := tcell.StyleDefault.Foreground(foreground)
+	if selected {
+		style = style.Background(tcell.ColorDarkSlateGray)
+	}
+	drawText(screen, x, y, style, truncate(fmt.Sprintf("%-*s", width, truncate(value, width)), width))
+	return x + width + 2
+}
+
+func (a *App) forwardStatusDisplay(id string) (string, tcell.Color) {
+	runtime := a.runningForwards[id]
+	if runtime == nil {
+		return "stopped", tcell.ColorDefault
+	}
+	switch runtime.status {
+	case forwardStatusConnecting:
+		return "connecting", tcell.ColorYellow
+	case forwardStatusRunning:
+		return "running", tcell.ColorGreen
+	case forwardStatusReconnecting:
+		return fmt.Sprintf("reconnecting %d/%d", runtime.attempts, service.MaxForwardReconnectAttempts), tcell.ColorYellow
+	case forwardStatusError:
+		if runtime.lastError == "" {
+			return "error", tcell.ColorRed
+		}
+		return "error: " + runtime.lastError, tcell.ColorRed
+	default:
+		return "stopped", tcell.ColorDefault
+	}
+}
+
+func hostAddressLabel(host domain.Host) string {
+	port := 22
+	if host.Port != nil && *host.Port > 0 {
+		port = *host.Port
+	}
+	return fmt.Sprintf("%s:%d", host.Hostname, port)
 }
 
 func clampInt(value, minValue, maxValue int) int {

@@ -939,13 +939,12 @@ func (a *App) deleteObject(ctx context.Context, kind domain.DocumentKind, id str
 }
 
 func (a *App) forwardRuntimeDetailLines(id string, forward *domain.Forward) []string {
-	status := "stopped"
+	status, _ := a.forwardStatusDisplay(id)
 	started := ""
-	if running := a.runningForwards[id]; running != nil {
-		status = "running"
-		started = running.Started.Format(time.RFC3339)
-	} else if err := a.forwardErrors[id]; err != "" {
-		status = "error: " + err
+	if runtime := a.runningForwards[id]; runtime != nil {
+		if !runtime.started.IsZero() {
+			started = runtime.started.Format(time.RFC3339)
+		}
 	}
 	lines := []string{
 		"Runtime:",

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -26,6 +27,8 @@ import (
 	"github.com/nermius/nermius/internal/domain"
 	"github.com/nermius/nermius/internal/termemu"
 )
+
+const MaxForwardReconnectAttempts = 5
 
 type Prompts struct {
 	Text     func(label string) (string, error)
@@ -76,6 +79,7 @@ type RunningForward struct {
 	closers  []io.Closer
 	done     chan error
 	waitOnce sync.Once
+	closing  atomic.Bool
 }
 
 func NewConnector(catalog *Catalog, knownHostsPath string) *Connector {
@@ -356,6 +360,7 @@ func (f *RunningForward) Done() <-chan error {
 }
 
 func (f *RunningForward) Close() error {
+	f.closing.Store(true)
 	return f.finish(nil)
 }
 
@@ -368,7 +373,9 @@ func (f *RunningForward) finish(waitErr error) error {
 				err = closeErr
 			}
 		}
-		if waitErr != nil && err == nil {
+		if f.closing.Load() {
+			err = nil
+		} else if waitErr != nil {
 			err = waitErr
 		}
 		if f.done != nil {
@@ -377,6 +384,16 @@ func (f *RunningForward) finish(waitErr error) error {
 		}
 	})
 	return err
+}
+
+func ForwardReconnectDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	if attempt > MaxForwardReconnectAttempts {
+		attempt = MaxForwardReconnectAttempts
+	}
+	return time.Duration(attempt) * time.Second
 }
 
 func (c *Connector) openClient(ctx context.Context, spec string, prompts Prompts) (domain.ResolvedConfig, *ssh.Client, []io.Closer, error) {
