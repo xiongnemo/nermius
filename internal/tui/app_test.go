@@ -181,6 +181,37 @@ func TestHostAddressLabelDefaultsPort(t *testing.T) {
 	}
 }
 
+func TestHostListColumnWidthsCapLabel(t *testing.T) {
+	items := []store.DocumentSummary{
+		{ID: "host-1", Label: "a very long host label that should not claim the whole row", UpdatedAt: time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC)},
+	}
+	_, labelWidth, addressWidth, _ := hostListColumnWidths(160, items, map[string]string{"host-1": "long.host.name.example.com:2200"})
+	if labelWidth != 32 {
+		t.Fatalf("host label width = %d, want cap 32", labelWidth)
+	}
+	if addressWidth <= 32 {
+		t.Fatalf("host address width = %d, want extra space allocated to address", addressWidth)
+	}
+}
+
+func TestForwardListColumnWidthsCapLabelAndGrowReason(t *testing.T) {
+	app := &App{
+		runningForwards: map[string]*forwardRuntime{
+			"forward-1": {status: forwardStatusError, reason: "connection reset by peer while waiting for remote listener"},
+		},
+	}
+	items := []store.DocumentSummary{
+		{ID: "forward-1", Label: "a very long forward label that should be capped", UpdatedAt: time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC)},
+	}
+	_, labelWidth, _, reasonWidth, _ := forwardListColumnWidths(170, items, app)
+	if labelWidth != 32 {
+		t.Fatalf("forward label width = %d, want cap 32", labelWidth)
+	}
+	if reasonWidth <= 56 {
+		t.Fatalf("forward reason width = %d, want extra space allocated to reason", reasonWidth)
+	}
+}
+
 func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 	app := &App{
 		tabs:      []domain.DocumentKind{domain.KindHost, domain.KindIdentity},

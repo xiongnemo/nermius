@@ -1259,22 +1259,30 @@ func hostListColumnWidths(totalWidth int, items []store.DocumentSummary, address
 		minIDWidth       = 12
 		minAddressWidth  = 12
 		minLabelWidth    = 12
+		maxLabelWidth    = 32
 		defaultTimeWidth = 20
-		maxAddressWidth  = 36
 	)
 	updatedWidth := max(len("UPDATED"), defaultTimeWidth)
 	addressWidth := minAddressWidth
+	labelWidth := minLabelWidth
 	for _, item := range items {
 		updatedWidth = max(updatedWidth, len(item.UpdatedAt.Format(time.RFC3339)))
 		addressWidth = max(addressWidth, len(addresses[item.ID]))
+		labelWidth = max(labelWidth, len(item.Label))
 	}
-	addressWidth = min(maxAddressWidth, max(addressWidth, len("ADDRESS")))
+	labelWidth = min(maxLabelWidth, max(labelWidth, len("LABEL")))
+	addressWidth = max(addressWidth, len("ADDRESS"))
 	if totalWidth <= 0 {
 		return minIDWidth, minLabelWidth, minAddressWidth, updatedWidth
 	}
 	maxIDWidth := totalWidth - addressWidth - updatedWidth - columnGap*3 - minLabelWidth
 	idWidth := min(defaultIDWidth, max(minIDWidth, maxIDWidth))
-	labelWidth := max(minLabelWidth, totalWidth-idWidth-addressWidth-updatedWidth-columnGap*3)
+	availableLabel := totalWidth - idWidth - addressWidth - updatedWidth - columnGap*3
+	if availableLabel < labelWidth {
+		labelWidth = max(minLabelWidth, availableLabel)
+	} else {
+		addressWidth += availableLabel - labelWidth
+	}
 	return idWidth, labelWidth, addressWidth, updatedWidth
 }
 
@@ -1295,28 +1303,36 @@ func forwardListColumnWidths(totalWidth int, items []store.DocumentSummary, app 
 		minIDWidth       = 12
 		minStatusWidth   = 10
 		minLabelWidth    = 12
+		maxLabelWidth    = 32
 		minReasonWidth   = 12
 		defaultTimeWidth = 20
 		maxStatusWidth   = 24
-		maxReasonWidth   = 56
 	)
 	updatedWidth := max(len("UPDATED"), defaultTimeWidth)
 	statusWidth := minStatusWidth
 	reasonWidth := minReasonWidth
+	labelWidth := minLabelWidth
 	for _, item := range items {
 		updatedWidth = max(updatedWidth, len(item.UpdatedAt.Format(time.RFC3339)))
+		labelWidth = max(labelWidth, len(item.Label))
 		statusText, _ := app.forwardStatusDisplay(item.ID)
 		statusWidth = max(statusWidth, len(statusText))
 		reasonWidth = max(reasonWidth, len(app.forwardReasonDisplay(item.ID)))
 	}
+	labelWidth = min(maxLabelWidth, max(labelWidth, len("LABEL")))
 	statusWidth = min(maxStatusWidth, max(statusWidth, len("STATUS")))
-	reasonWidth = min(maxReasonWidth, max(reasonWidth, len("REASON")))
+	reasonWidth = max(reasonWidth, len("REASON"))
 	if totalWidth <= 0 {
 		return minIDWidth, minLabelWidth, minStatusWidth, minReasonWidth, updatedWidth
 	}
 	maxIDWidth := totalWidth - statusWidth - reasonWidth - updatedWidth - columnGap*4 - minLabelWidth
 	idWidth := min(defaultIDWidth, max(minIDWidth, maxIDWidth))
-	labelWidth := max(minLabelWidth, totalWidth-idWidth-statusWidth-reasonWidth-updatedWidth-columnGap*4)
+	availableLabel := totalWidth - idWidth - statusWidth - reasonWidth - updatedWidth - columnGap*4
+	if availableLabel < labelWidth {
+		labelWidth = max(minLabelWidth, availableLabel)
+	} else {
+		reasonWidth += availableLabel - labelWidth
+	}
 	return idWidth, labelWidth, statusWidth, reasonWidth, updatedWidth
 }
 
