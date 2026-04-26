@@ -30,7 +30,9 @@ go test ./...
 go build ./...
 ```
 
-`nermius version` prints a build string in the form `v{major}.{minor}.{patch}-{branch}-{commit}[-dirty]`. The current base version is `v0.0.1`.
+`nermius version` prints a build string in the form `v{major}.{minor}.{patch}-{branch}-{commit}[-dirty]`.
+
+CI derives the base `v{major}.{minor}.{patch}` from `VERSION`: patch is `VERSION`'s patch plus the number of commits since `VERSION` was last changed. To reset patch for a new major/minor line, edit `VERSION` to the new epoch version, such as `v0.1.0`; that commit builds as `v0.1.0`, and the next commit builds as `v0.1.1`.
 
 ## Quick start
 

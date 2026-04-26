@@ -24,6 +24,8 @@ jobs:
       matrix: ${{ steps.generate.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -89,6 +91,8 @@ jobs:
       matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -106,6 +110,7 @@ jobs:
         run: |
           mkdir -p dist
           output="${ARTIFACT}${EXT}"
+          eval "$(bash scripts/compute-version.sh)"
           branch="$(git rev-parse --abbrev-ref HEAD)"
           if [ "$branch" = "HEAD" ]; then
             branch="detached"
@@ -120,7 +125,7 @@ jobs:
             "-s"
             "-w"
             "-X"
-            "github.com/nermius/nermius/internal/buildinfo.baseVersion=v0.0.1"
+            "github.com/nermius/nermius/internal/buildinfo.baseVersion=${base_version}"
             "-X"
             "github.com/nermius/nermius/internal/buildinfo.gitBranch=${branch}"
             "-X"
@@ -130,6 +135,7 @@ jobs:
             "-X"
             "github.com/nermius/nermius/internal/buildinfo.buildTime=${build_time}"
           )
+          echo "Building ${base_version}-${branch}-${commit}"
           go build -trimpath -ldflags="${ldflags[*]}" -o "dist/${output}" .
           sha256sum "dist/${output}" > "dist/${output}.sha256"
           tar -C dist -czf "dist/${ARCHIVE}" "${output}" "${output}.sha256"
@@ -151,6 +157,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -162,10 +170,12 @@ jobs:
         name: Compute prerelease metadata
         shell: bash
         run: |
+          eval "$(bash scripts/compute-version.sh)"
           short_sha="${GITHUB_SHA::12}"
-          tag="v0.0.1-dev-${short_sha}"
+          tag="${base_version}-dev-${short_sha}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "name=Dev prerelease ${tag}" >> "$GITHUB_OUTPUT"
+          echo "base_version=${base_version}" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub prerelease
         uses: softprops/action-gh-release@v2
@@ -178,4 +188,5 @@ jobs:
           body: |
             Automated prerelease build from `dev`.
             
+            Version: `${{ steps.meta.outputs.base_version }}`
             Commit: `${{ github.sha }}`
