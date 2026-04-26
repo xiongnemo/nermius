@@ -514,7 +514,7 @@ func promptKeyInteractive(defaults domain.Key) (domain.Key, error) {
 	}
 }
 
-func promptForwardInteractive(defaults domain.Forward) (domain.Forward, error) {
+func promptForwardInteractive(ctx context.Context, catalog *service.Catalog, defaults domain.Forward) (domain.Forward, error) {
 	var out domain.Forward
 	var err error
 	out.ID = defaults.ID
@@ -523,6 +523,14 @@ func promptForwardInteractive(defaults domain.Forward) (domain.Forward, error) {
 		return out, err
 	}
 	out.Description, err = promptLine("Description", defaults.Description, false)
+	if err != nil {
+		return out, err
+	}
+	hostSpec, err := promptLine("Host (name/ID)", defaults.HostRef, true)
+	if err != nil {
+		return out, err
+	}
+	out.HostRef, err = catalog.ResolveDocumentID(ctx, domain.KindHost, hostSpec)
 	if err != nil {
 		return out, err
 	}
@@ -598,7 +606,7 @@ func buildInteractiveDocument(ctx context.Context, catalog *service.Catalog, kin
 	case domain.KindKey:
 		return promptKeyInteractive(domain.Key{})
 	case domain.KindForward:
-		return promptForwardInteractive(domain.Forward{})
+		return promptForwardInteractive(ctx, catalog, domain.Forward{})
 	default:
 		return nil, fmt.Errorf("interactive mode is not supported for %s", kind)
 	}

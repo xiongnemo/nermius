@@ -147,6 +147,7 @@ type Forward struct {
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
 	Description string      `json:"description,omitempty"`
+	HostRef     string      `json:"host_ref,omitempty"`
 	Type        ForwardType `json:"type"`
 	ListenHost  string      `json:"listen_host,omitempty"`
 	ListenPort  int         `json:"listen_port"`

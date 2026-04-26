@@ -66,6 +66,7 @@ nermius version
 nermius connect my-host
 nermius -vv connect my-host
 nermius exec my-host hostname
+nermius forward start prod-db
 
 # 7. Open the TUI for browsing objects and sessions.
 nermius tui
@@ -83,17 +84,17 @@ There is no plaintext local session file anymore. On migrated/current vaults, ob
 Inside the TUI object tabs:
 
 - `HOST / GROUP / PROFILE / IDENTITY / KEY / FORWARD / KNOWN-HOST` all support in-screen CRUD modals
-- `Enter` connects on `HOST`, but opens a read-only detail view on every other tab
+- `Enter` connects on `HOST`, toggles the selected tunnel on `FORWARD`, and opens a read-only detail view on every other tab
 - `d` opens detail, `e` opens edit, `a` opens a create form
 - `Delete` or `x` opens delete confirmation; referenced objects are blocked and show who still depends on them
 - `/` opens a filter prompt for the current tab, and `r` reloads the lists
 - reference fields use searchable pickers, and ordered lists such as profiles, forwards, known-host host patterns, and identity auth methods use a dedicated list editor
-- `FORWARD` objects are reusable `-L`/`-R`/`-D` definitions; attach them from a `HOST` or `PROFILE` edit form through the `Forwards` picker
+- `FORWARD` objects are reusable `-L`/`-R`/`-D` tunnel definitions with their own Host picker; `Enter` or `Space` starts/stops the selected tunnel for the lifetime of the current TUI process
 
 Inside the TUI session view:
 
 - connection prompts such as unknown host-key trust, password, username, and key passphrase stay inside the TUI as modals
-- connection progress is shown in the status bar while resolving hosts, dialing, checking known hosts, authenticating, starting forwards, and opening the remote shell
+- connection progress is shown in the status bar while resolving hosts, dialing, checking known hosts, authenticating, and opening the remote shell
 - use the mouse wheel to scroll local shell history
 - use `Shift+wheel` to force local scrollback when the remote app has mouse tracking enabled
 - drag to select visible terminal text, including locally scrolled shell history
@@ -254,6 +255,22 @@ nermius -vvv exec my-host "uname -a"
 
 `-v` prints high-level SSH decisions such as host key acceptance. `-vv` adds host key backend details and preferred host key algorithms. `-vvv` also includes low-level auth method selection.
 
+## Port Forwarding
+
+Saved `FORWARD` objects are standalone tunnels. Each one has a `host_ref`, which is the SSH transport/intermediate host used to establish the tunnel.
+
+```powershell
+nermius forward add -it
+nermius forward start prod-db
+```
+
+`forward start` runs in the foreground and keeps the tunnel open until `Ctrl+C`. TUI `FORWARD` toggles are also process-local; they close when the TUI exits. Saved `Host/Profile.forward_ids` remain visible in resolved config for organization and inspection, but saved forwards no longer auto-start when opening a shell. One-time CLI forwards still work with `connect`/`exec`:
+
+```powershell
+nermius connect my-host -L 15432:db.internal:5432
+nermius connect my-host -D 1080
+```
+
 ## JSON examples
 
 Host:
@@ -275,6 +292,7 @@ Forward:
 ```json
 {
   "name": "prod-db",
+  "host_ref": "host-uuid",
   "type": "local",
   "listen_host": "127.0.0.1",
   "listen_port": 15432,

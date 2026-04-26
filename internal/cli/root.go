@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 
@@ -309,6 +311,9 @@ func (r *runtime) newResourceCmd(kind domain.DocumentKind) *cobra.Command {
 		r.newListCmd(kind),
 		r.newDeleteCmd(kind),
 	)
+	if kind == domain.KindForward {
+		cmd.AddCommand(r.newForwardStartCmd())
+	}
 	return cmd
 }
 
@@ -702,6 +707,46 @@ func (r *runtime) newDeleteCmd(kind domain.DocumentKind) *cobra.Command {
 	}
 }
 
+func (r *runtime) newForwardStartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "start <name-or-id>",
+		Short: "Start a saved forward in the foreground",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			catalog, db, paths, err := r.openCatalog(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			connector := service.NewConnector(catalog, paths.KnownHostsPath)
+			connector.Verbosity = r.verbose
+			runCtx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			defer stop()
+			running, err := connector.StartForward(runCtx, args[0], service.Prompts{
+				Text:     promptText,
+				Secret:   promptSecret,
+				Confirm:  promptConfirm,
+				Progress: cliProgress(r.verbose, cmd.ErrOrStderr()),
+			})
+			if err != nil {
+				return err
+			}
+			defer running.Close()
+			if _, err := fmt.Fprintln(cmd.OutOrStdout(), describeRunningForward(running)); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Press Ctrl+C to stop.")
+			select {
+			case err := <-running.Done():
+				return err
+			case <-runCtx.Done():
+				_ = running.Close()
+				return nil
+			}
+		},
+	}
+}
+
 func (r *runtime) newInspectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect <host>",
@@ -1033,6 +1078,39 @@ func saveDocumentAndPrint(ctx context.Context, catalog *service.Catalog, kind do
 	default:
 		return fmt.Errorf("unsupported kind %s", kind)
 	}
+}
+
+func describeRunningForward(running *service.RunningForward) string {
+	if running == nil {
+		return ""
+	}
+	forward := running.Forward
+	bind := netJoinHostPort(defaultCLIListenHost(forward.ListenHost), forward.ListenPort)
+	via := running.Host.Label
+	if via == "" {
+		via = running.Host.Hostname
+	}
+	switch forward.Type {
+	case domain.ForwardDynamic:
+		return fmt.Sprintf("Started dynamic forward %q via %s: SOCKS5 on %s", forward.Label(), via, bind)
+	case domain.ForwardRemote:
+		target := netJoinHostPort(forward.TargetHost, forward.TargetPort)
+		return fmt.Sprintf("Started remote forward %q via %s: %s -> %s", forward.Label(), via, bind, target)
+	default:
+		target := netJoinHostPort(forward.TargetHost, forward.TargetPort)
+		return fmt.Sprintf("Started local forward %q via %s: %s -> %s", forward.Label(), via, bind, target)
+	}
+}
+
+func netJoinHostPort(host string, port int) string {
+	return net.JoinHostPort(strings.TrimSpace(host), strconv.Itoa(port))
+}
+
+func defaultCLIListenHost(host string) string {
+	if strings.TrimSpace(host) == "" {
+		return "127.0.0.1"
+	}
+	return strings.TrimSpace(host)
 }
 
 func resolveSpecsToIDs(ctx context.Context, catalog *service.Catalog, kind domain.DocumentKind, specs []string) ([]string, error) {

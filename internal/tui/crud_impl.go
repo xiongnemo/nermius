@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -751,6 +753,7 @@ func (a *App) buildForwardForm(ctx context.Context, id string, isNew bool) (*for
 		fields: []*formField{
 			{key: "name", label: "Name", kind: fieldKindText, required: true, value: forward.Name},
 			{key: "description", label: "Description", kind: fieldKindTextArea, value: forward.Description},
+			{key: "host_ref", label: "Host", kind: fieldKindSingleRef, required: isNew, refKind: domain.KindHost, refValue: a.refItem(ctx, domain.KindHost, forward.HostRef)},
 			{key: "type", label: "Type", kind: fieldKindEnum, value: string(forward.Type), options: []string{string(domain.ForwardLocal), string(domain.ForwardRemote), string(domain.ForwardDynamic)}},
 			{key: "listen_host", label: "Listen Host", kind: fieldKindText, value: forward.ListenHost},
 			{key: "listen_port", label: "Listen Port", kind: fieldKindInt, required: true, value: strconv.Itoa(forward.ListenPort)},
@@ -764,6 +767,10 @@ func (a *App) buildForwardForm(ctx context.Context, id string, isNew bool) (*for
 		listenPort, err := parseRequiredInt(formValue(form, "listen_port"), "listen port")
 		if err != nil {
 			return err
+		}
+		hostRef := formRefID(form, "host_ref")
+		if form.isNew && strings.TrimSpace(hostRef) == "" {
+			return errors.New("host is required")
 		}
 		forwardType := domain.ForwardType(formValue(form, "type"))
 		targetHost := ""
@@ -782,6 +789,7 @@ func (a *App) buildForwardForm(ctx context.Context, id string, isNew bool) (*for
 			ID:          form.id,
 			Name:        strings.TrimSpace(formValue(form, "name")),
 			Description: formValue(form, "description"),
+			HostRef:     hostRef,
 			Type:        forwardType,
 			ListenHost:  formValue(form, "listen_host"),
 			ListenPort:  listenPort,
@@ -928,6 +936,33 @@ func (a *App) deleteObject(ctx context.Context, kind domain.DocumentKind, id str
 		return err
 	}
 	return a.catalog.Delete(ctx, id)
+}
+
+func (a *App) forwardRuntimeDetailLines(id string, forward *domain.Forward) []string {
+	status := "stopped"
+	started := ""
+	if running := a.runningForwards[id]; running != nil {
+		status = "running"
+		started = running.Started.Format(time.RFC3339)
+	} else if err := a.forwardErrors[id]; err != "" {
+		status = "error: " + err
+	}
+	lines := []string{
+		"Runtime:",
+		"  status: " + status,
+	}
+	if started != "" {
+		lines = append(lines, "  started_at: "+started)
+	}
+	if forward != nil {
+		lines = append(lines,
+			"  host_ref: "+emptyFallback(forward.HostRef, "(none)"),
+			"  bind: "+forwardBindLabel(*forward),
+			"  destination: "+forwardDestinationLabel(*forward),
+			"",
+		)
+	}
+	return lines
 }
 
 func (a *App) openHostSessionByID(ctx context.Context, id string) error {
@@ -1563,6 +1598,25 @@ func formRefID(form *formModal, key string) string {
 		return strings.TrimSpace(field.refValue.ID)
 	}
 	return ""
+}
+
+func emptyFallback(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func forwardBindLabel(forward domain.Forward) string {
+	return net.JoinHostPort(emptyFallback(forward.ListenHost, "127.0.0.1"), strconv.Itoa(forward.ListenPort))
+}
+
+func forwardDestinationLabel(forward domain.Forward) string {
+	if forward.Type == domain.ForwardDynamic {
+		return "SOCKS5"
+	}
+	return net.JoinHostPort(forward.TargetHost, strconv.Itoa(forward.TargetPort))
 }
 
 func parseOptionalStringPtr(value string) *string {

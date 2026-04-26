@@ -404,7 +404,11 @@ func (a *App) buildDetailLines(ctx context.Context, kind domain.DocumentKind, id
 		if err != nil {
 			return nil, false, err
 		}
-		return a.genericDetailLines(ctx, kind, id, forward)
+		lines, canConnect, err := a.genericDetailLines(ctx, kind, id, forward)
+		if err != nil {
+			return nil, false, err
+		}
+		return append(a.forwardRuntimeDetailLines(id, forward), lines...), canConnect, nil
 	case domain.KindKnownHost:
 		entry, err := service.LoadKnownHostEntry(ctx, a.catalog, a.paths.KnownHostsPath, id)
 		if err != nil {

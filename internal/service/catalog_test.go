@@ -151,6 +151,31 @@ func TestSaveForwardRequiresTargetForLocalAndRemote(t *testing.T) {
 	}
 }
 
+func TestSaveForwardNormalizesHostRef(t *testing.T) {
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	host := &domain.Host{Title: "transport", Hostname: "transport.example"}
+	if err := catalog.SaveHost(context.Background(), host); err != nil {
+		t.Fatalf("SaveHost failed: %v", err)
+	}
+	forward := &domain.Forward{
+		Name:       "db",
+		HostRef:    "transport",
+		Type:       domain.ForwardLocal,
+		ListenPort: 15432,
+		TargetHost: "db.internal",
+		TargetPort: 5432,
+		Enabled:    true,
+	}
+	if err := catalog.SaveForward(context.Background(), forward); err != nil {
+		t.Fatalf("SaveForward failed: %v", err)
+	}
+	if forward.HostRef != host.ID {
+		t.Fatalf("expected host_ref to normalize to %s, got %s", host.ID, forward.HostRef)
+	}
+}
+
 func TestFindReferencesIncludesHostProfileAndIdentityRelations(t *testing.T) {
 	catalog, cleanup := newTestCatalog(t)
 	defer cleanup()
@@ -193,6 +218,18 @@ func TestFindReferencesIncludesHostProfileAndIdentityRelations(t *testing.T) {
 	if err := catalog.SaveHost(context.Background(), host); err != nil {
 		t.Fatalf("SaveHost failed: %v", err)
 	}
+	forward := &domain.Forward{
+		Name:       "db",
+		HostRef:    host.ID,
+		Type:       domain.ForwardLocal,
+		ListenPort: 15432,
+		TargetHost: "db.internal",
+		TargetPort: 5432,
+		Enabled:    true,
+	}
+	if err := catalog.SaveForward(context.Background(), forward); err != nil {
+		t.Fatalf("SaveForward failed: %v", err)
+	}
 
 	groupRefs, err := catalog.FindReferences(context.Background(), group.ID)
 	if err != nil {
@@ -213,6 +250,14 @@ func TestFindReferencesIncludesHostProfileAndIdentityRelations(t *testing.T) {
 	wantFields := []string{"key_ref", "methods.key_id"}
 	if gotFields[0] != wantFields[0] || gotFields[1] != wantFields[1] {
 		t.Fatalf("unexpected key ref fields %v", gotFields)
+	}
+
+	hostRefs, err := catalog.FindReferences(context.Background(), host.ID)
+	if err != nil {
+		t.Fatalf("FindReferences(host) failed: %v", err)
+	}
+	if len(hostRefs) != 1 || hostRefs[0].Kind != domain.KindForward || hostRefs[0].Field != "host_ref" {
+		t.Fatalf("unexpected host refs: %#v", hostRefs)
 	}
 }
 

@@ -68,26 +68,36 @@ type EmbeddedSession struct {
 	done     chan error
 }
 
+type RunningForward struct {
+	Forward  domain.Forward
+	Host     domain.ResolvedConfig
+	Started  time.Time
+	client   *ssh.Client
+	closers  []io.Closer
+	done     chan error
+	waitOnce sync.Once
+}
+
 func NewConnector(catalog *Catalog, knownHostsPath string) *Connector {
 	return &Connector{Catalog: catalog, DefaultKnownHosts: knownHostsPath}
 }
 
 func (c *Connector) ConnectInteractive(ctx context.Context, spec string, prompts Prompts, extraForwards []domain.Forward) error {
-	resolved, client, cleanups, err := c.openClient(ctx, spec, prompts)
+	_, client, cleanups, err := c.openClient(ctx, spec, prompts)
 	if err != nil {
 		return err
 	}
 	defer closeAll(cleanups)
 	defer client.Close()
 
-	forwards := append([]domain.Forward{}, resolved.Forwards...)
-	forwards = append(forwards, extraForwards...)
-	reportProgress(prompts, "starting port forwards")
-	listenerClosers, err := c.startForwards(ctx, client, forwards)
-	if err != nil {
-		return err
+	if len(extraForwards) > 0 {
+		reportProgress(prompts, "starting runtime port forwards")
+		listenerClosers, err := c.startForwards(ctx, client, extraForwards)
+		if err != nil {
+			return err
+		}
+		defer closeAll(listenerClosers)
 	}
-	defer closeAll(listenerClosers)
 
 	session, err := client.NewSession()
 	if err != nil {
@@ -137,21 +147,21 @@ func (c *Connector) Exec(ctx context.Context, spec, command string, prompts Prom
 	if strings.TrimSpace(command) == "" {
 		return errors.New("remote command is required")
 	}
-	resolved, client, cleanups, err := c.openClient(ctx, spec, prompts)
+	_, client, cleanups, err := c.openClient(ctx, spec, prompts)
 	if err != nil {
 		return err
 	}
 	defer closeAll(cleanups)
 	defer client.Close()
 
-	forwards := append([]domain.Forward{}, resolved.Forwards...)
-	forwards = append(forwards, extraForwards...)
-	reportProgress(prompts, "starting port forwards")
-	listenerClosers, err := c.startForwards(ctx, client, forwards)
-	if err != nil {
-		return err
+	if len(extraForwards) > 0 {
+		reportProgress(prompts, "starting runtime port forwards")
+		listenerClosers, err := c.startForwards(ctx, client, extraForwards)
+		if err != nil {
+			return err
+		}
+		defer closeAll(listenerClosers)
 	}
-	defer closeAll(listenerClosers)
 
 	session, err := client.NewSession()
 	if err != nil {
@@ -178,14 +188,6 @@ func (c *Connector) OpenEmbeddedSession(ctx context.Context, spec string, prompt
 	if err != nil {
 		return nil, err
 	}
-	reportProgress(prompts, "starting port forwards")
-	listenerClosers, err := c.startForwards(ctx, client, resolved.Forwards)
-	if err != nil {
-		closeAll(cleanups)
-		client.Close()
-		return nil, err
-	}
-	cleanups = append(cleanups, listenerClosers...)
 	session, err := client.NewSession()
 	if err != nil {
 		closeAll(cleanups)
@@ -247,6 +249,51 @@ func (c *Connector) OpenEmbeddedSession(ctx context.Context, spec string, prompt
 	return embedded, nil
 }
 
+func (c *Connector) StartForward(ctx context.Context, spec string, prompts Prompts) (*RunningForward, error) {
+	forwardID, err := c.Catalog.ResolveDocumentID(ctx, domain.KindForward, spec)
+	if err != nil {
+		return nil, err
+	}
+	forward, err := c.Catalog.GetForward(ctx, forwardID)
+	if err != nil {
+		return nil, err
+	}
+	if !forward.Enabled {
+		return nil, fmt.Errorf("forward %q is disabled", forward.Label())
+	}
+	if strings.TrimSpace(forward.HostRef) == "" {
+		return nil, fmt.Errorf("forward %q requires host_ref before it can be started", forward.Label())
+	}
+	if err := validateRunnableForward(*forward); err != nil {
+		return nil, err
+	}
+	reportProgress(prompts, "opening SSH transport for forward "+forward.Label())
+	resolved, client, cleanups, err := c.openClient(ctx, forward.HostRef, prompts)
+	if err != nil {
+		return nil, err
+	}
+	reportProgress(prompts, "starting forward "+forward.Label())
+	forwardClosers, err := c.startForwards(ctx, client, []domain.Forward{*forward})
+	if err != nil {
+		closeAll(cleanups)
+		client.Close()
+		return nil, err
+	}
+	cleanups = append(cleanups, forwardClosers...)
+	running := &RunningForward{
+		Forward: *forward,
+		Host:    resolved,
+		Started: time.Now(),
+		client:  client,
+		closers: cleanups,
+		done:    make(chan error, 1),
+	}
+	go func() {
+		running.finish(client.Wait())
+	}()
+	return running, nil
+}
+
 func (s *EmbeddedSession) WriteKeys(data []byte) error {
 	_, err := s.stdin.Write(data)
 	return err
@@ -300,6 +347,34 @@ func (s *EmbeddedSession) Close() error {
 		_ = s.session.Close()
 		_ = s.client.Close()
 		err = closeAll(s.closers)
+	})
+	return err
+}
+
+func (f *RunningForward) Done() <-chan error {
+	return f.done
+}
+
+func (f *RunningForward) Close() error {
+	return f.finish(nil)
+}
+
+func (f *RunningForward) finish(waitErr error) error {
+	var err error
+	f.waitOnce.Do(func() {
+		err = closeAll(f.closers)
+		if f.client != nil {
+			if closeErr := f.client.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if waitErr != nil && err == nil {
+			err = waitErr
+		}
+		if f.done != nil {
+			f.done <- err
+			close(f.done)
+		}
 	})
 	return err
 }
@@ -646,6 +721,10 @@ func (c *Connector) startForwards(ctx context.Context, client *ssh.Client, forwa
 		if !forward.Enabled {
 			continue
 		}
+		if err := validateRunnableForward(forward); err != nil {
+			closeAll(closers)
+			return nil, err
+		}
 		var (
 			closer io.Closer
 			err    error
@@ -667,6 +746,28 @@ func (c *Connector) startForwards(ctx context.Context, client *ssh.Client, forwa
 		closers = append(closers, closer)
 	}
 	return closers, nil
+}
+
+func validateRunnableForward(forward domain.Forward) error {
+	if forward.Type == "" {
+		return errors.New("forward type is required")
+	}
+	if forward.ListenPort == 0 {
+		return errors.New("listen_port is required")
+	}
+	switch forward.Type {
+	case domain.ForwardLocal, domain.ForwardRemote:
+		if strings.TrimSpace(forward.TargetHost) == "" {
+			return errors.New("target_host is required")
+		}
+		if forward.TargetPort == 0 {
+			return errors.New("target_port is required")
+		}
+	case domain.ForwardDynamic:
+	default:
+		return fmt.Errorf("unsupported forward type %s", forward.Type)
+	}
+	return nil
 }
 
 func startLocalForward(ctx context.Context, client *ssh.Client, forward domain.Forward) (io.Closer, error) {

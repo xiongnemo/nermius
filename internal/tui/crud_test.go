@@ -153,6 +153,30 @@ func TestNewForwardFormDefaultsToLocalWithTargetFields(t *testing.T) {
 	if targetHost == nil || targetHost.visible == nil || !targetHost.visible(form) {
 		t.Fatal("expected target host to be visible for default local forward")
 	}
+	hostRef := formFieldByKey(form, "host_ref")
+	if hostRef == nil || hostRef.kind != fieldKindSingleRef || hostRef.refKind != domain.KindHost || !hostRef.required {
+		t.Fatalf("expected required host picker field, got %#v", hostRef)
+	}
+}
+
+func TestForwardRecordLabelIncludesRuntimeState(t *testing.T) {
+	app := &App{
+		runningForwards: map[string]*service.RunningForward{
+			"forward-running": {},
+		},
+		forwardErrors: map[string]string{
+			"forward-error": "listen failed",
+		},
+	}
+	if got := app.displayRecordLabel(domain.KindForward, store.DocumentSummary{ID: "forward-running", Label: "db"}); got != "[running] db" {
+		t.Fatalf("running label = %q", got)
+	}
+	if got := app.displayRecordLabel(domain.KindForward, store.DocumentSummary{ID: "forward-error", Label: "api"}); got != "[error] api" {
+		t.Fatalf("error label = %q", got)
+	}
+	if got := app.displayRecordLabel(domain.KindForward, store.DocumentSummary{ID: "forward-stopped", Label: "socks"}); got != "[stopped] socks" {
+		t.Fatalf("stopped label = %q", got)
+	}
 }
 
 func newTestAppWithCatalog(t *testing.T) (*App, func()) {

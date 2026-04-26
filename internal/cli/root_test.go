@@ -188,6 +188,34 @@ func TestCompletionSuggestsVaultKeychainSubcommand(t *testing.T) {
 	}
 }
 
+func TestForwardHelpIncludesStartSubcommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"forward", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(forward --help) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("start")) {
+		t.Fatalf("expected forward help to include start, got:\n%s", out.String())
+	}
+}
+
+func TestCompletionSuggestsForwardStartSubcommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "forward", "st"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete forward st) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("start")) {
+		t.Fatalf("expected completion to suggest start, got:\n%s", out.String())
+	}
+}
+
 func newCLITestCatalog(t *testing.T) (*service.Catalog, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vault.db")

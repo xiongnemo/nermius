@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +78,34 @@ func TestResolveHostPrecedenceAndForwardMerging(t *testing.T) {
 	}
 	if resolved.Forwards[0].ID != "f-profile" || resolved.Forwards[1].ID != "f-host" {
 		t.Fatalf("unexpected forward order: %+v", resolved.Forwards)
+	}
+}
+
+func TestForwardHostRefJSONRoundTrip(t *testing.T) {
+	forward := Forward{
+		ID:         "forward-1",
+		Name:       "db",
+		HostRef:    "host-1",
+		Type:       ForwardLocal,
+		ListenHost: "127.0.0.1",
+		ListenPort: 15432,
+		TargetHost: "db.internal",
+		TargetPort: 5432,
+		Enabled:    true,
+	}
+	data, err := json.Marshal(forward)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"host_ref":"host-1"`) {
+		t.Fatalf("expected host_ref in JSON: %s", data)
+	}
+	var decoded Forward
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if decoded.HostRef != "host-1" {
+		t.Fatalf("host_ref roundtrip = %q", decoded.HostRef)
 	}
 }
 

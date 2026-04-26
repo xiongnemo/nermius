@@ -146,6 +146,78 @@ func TestKnownHostCallbackReportsProgress(t *testing.T) {
 	}
 }
 
+func TestStartForwardRequiresHostRef(t *testing.T) {
+	ctx := context.Background()
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	forward := &domain.Forward{
+		Name:       "db",
+		Type:       domain.ForwardLocal,
+		ListenHost: "127.0.0.1",
+		ListenPort: 15432,
+		TargetHost: "db.internal",
+		TargetPort: 5432,
+		Enabled:    true,
+	}
+	if err := catalog.SaveForward(ctx, forward); err != nil {
+		t.Fatalf("SaveForward failed: %v", err)
+	}
+	_, err := NewConnector(catalog, filepath.Join(t.TempDir(), "known_hosts")).StartForward(ctx, forward.ID, Prompts{})
+	if err == nil || !strings.Contains(err.Error(), "host_ref") {
+		t.Fatalf("expected host_ref error, got %v", err)
+	}
+}
+
+func TestStartForwardRejectsDisabledForward(t *testing.T) {
+	ctx := context.Background()
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	host := &domain.Host{Title: "transport", Hostname: "transport.example"}
+	if err := catalog.SaveHost(ctx, host); err != nil {
+		t.Fatalf("SaveHost failed: %v", err)
+	}
+	forward := &domain.Forward{
+		Name:       "db",
+		HostRef:    host.ID,
+		Type:       domain.ForwardLocal,
+		ListenHost: "127.0.0.1",
+		ListenPort: 15432,
+		TargetHost: "db.internal",
+		TargetPort: 5432,
+		Enabled:    false,
+	}
+	if err := catalog.SaveForward(ctx, forward); err != nil {
+		t.Fatalf("SaveForward failed: %v", err)
+	}
+	_, err := NewConnector(catalog, filepath.Join(t.TempDir(), "known_hosts")).StartForward(ctx, forward.ID, Prompts{})
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected disabled error, got %v", err)
+	}
+}
+
+func TestValidateRunnableForwardRequiresTargetForLocalAndRemote(t *testing.T) {
+	err := validateRunnableForward(domain.Forward{
+		Name:       "db",
+		Type:       domain.ForwardLocal,
+		ListenPort: 15432,
+		Enabled:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "target_host") {
+		t.Fatalf("expected target_host error, got %v", err)
+	}
+
+	if err := validateRunnableForward(domain.Forward{
+		Name:       "socks",
+		Type:       domain.ForwardDynamic,
+		ListenPort: 1080,
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("dynamic forward should not require target: %v", err)
+	}
+}
+
 func TestStrictKnownHostsWithoutConfirmStillFailsOnUnknownKey(t *testing.T) {
 	ctx := context.Background()
 	pub := mustPublicKey(t)

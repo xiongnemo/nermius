@@ -161,6 +161,13 @@ func (c *Catalog) SaveForward(ctx context.Context, forward *domain.Forward) erro
 			return errors.New("target_port is required")
 		}
 	}
+	if strings.TrimSpace(forward.HostRef) != "" {
+		hostID, err := c.ResolveDocumentID(ctx, domain.KindHost, forward.HostRef)
+		if err != nil {
+			return fmt.Errorf("host_ref: %w", err)
+		}
+		forward.HostRef = hostID
+	}
 	return c.withWriteKey(ctx, func(writeKey []byte) error {
 		if err := c.ensureLoaded(ctx); err != nil {
 			return err
@@ -340,6 +347,16 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 			if method.Type == domain.AuthMethodKey && method.KeyID == targetID {
 				refs = append(refs, DocumentReference{Kind: domain.KindIdentity, ID: identity.ID, Label: identity.Label(), Field: "methods.key_id"})
 			}
+		}
+	}
+
+	forwards, err := c.listForwards(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, forward := range forwards {
+		if forward.HostRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindForward, ID: forward.ID, Label: forward.Label(), Field: "host_ref"})
 		}
 	}
 
@@ -775,6 +792,22 @@ func (c *Catalog) listIdentities(ctx context.Context) ([]domain.Identity, error)
 			return nil, err
 		}
 		out = append(out, identity)
+	}
+	return out, nil
+}
+
+func (c *Catalog) listForwards(ctx context.Context) ([]domain.Forward, error) {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	recs := c.documentRecordsByKind(domain.KindForward)
+	out := make([]domain.Forward, 0, len(recs))
+	for _, rec := range recs {
+		var forward domain.Forward
+		if err := json.Unmarshal(rec.Body, &forward); err != nil {
+			return nil, err
+		}
+		out = append(out, forward)
 	}
 	return out, nil
 }

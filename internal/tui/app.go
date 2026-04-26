@@ -32,6 +32,8 @@ type App struct {
 	filters          map[domain.DocumentKind]string
 	sessions         []*service.EmbeddedSession
 	activeSession    int
+	runningForwards  map[string]*service.RunningForward
+	forwardErrors    map[string]string
 	status           string
 	cursorBlinkOn    bool
 	cursorBlinkAt    time.Time
@@ -73,20 +75,23 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 			domain.KindForward,
 			domain.KindKnownHost,
 		},
-		records:        map[domain.DocumentKind][]store.DocumentSummary{},
-		filters:        map[domain.DocumentKind]string{},
-		status:         "",
-		cursorBlinkOn:  true,
-		cursorBlinkAt:  time.Now().Add(500 * time.Millisecond),
-		lastMouseX:     -1,
-		lastMouseY:     -1,
-		lastClickIndex: -1,
-		focused:        true,
-		scrollOffsets:  map[*service.EmbeddedSession]int{},
+		records:         map[domain.DocumentKind][]store.DocumentSummary{},
+		filters:         map[domain.DocumentKind]string{},
+		runningForwards: map[string]*service.RunningForward{},
+		forwardErrors:   map[string]string{},
+		status:          "",
+		cursorBlinkOn:   true,
+		cursorBlinkAt:   time.Now().Add(500 * time.Millisecond),
+		lastMouseX:      -1,
+		lastMouseY:      -1,
+		lastClickIndex:  -1,
+		focused:         true,
+		scrollOffsets:   map[*service.EmbeddedSession]int{},
 	}
 	if err := app.reload(ctx); err != nil {
 		return err
 	}
+	defer app.closeRunningForwards()
 	return app.loop(ctx)
 }
 
@@ -112,6 +117,7 @@ func (a *App) loop(ctx context.Context) error {
 				a.cursorBlinkAt = now.Add(500 * time.Millisecond)
 			}
 			a.collectSessionUpdates()
+			a.collectForwardUpdates()
 		case ev := <-events:
 			switch event := ev.(type) {
 			case *tcell.EventResize:
@@ -214,6 +220,10 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			if err := a.openSelectedHostSession(ctx); err != nil {
 				a.status = err.Error()
 			}
+		} else if a.currentKind() == domain.KindForward {
+			if err := a.toggleSelectedForward(ctx); err != nil {
+				a.status = err.Error()
+			}
 		} else if err := a.openDetailModal(ctx); err != nil {
 			a.status = err.Error()
 		}
@@ -247,6 +257,12 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			}
 		case '/':
 			a.openFilterModal()
+		case ' ':
+			if a.currentKind() == domain.KindForward {
+				if err := a.toggleSelectedForward(ctx); err != nil {
+					a.status = err.Error()
+				}
+			}
 		case 'x':
 			if err := a.openDeleteConfirm(ctx); err != nil {
 				a.status = err.Error()
@@ -407,6 +423,8 @@ func (a *App) footerPrompt() string {
 	enterAction := "Enter detail"
 	if a.currentKind() == domain.KindHost {
 		enterAction = "Enter/double-click connect"
+	} else if a.currentKind() == domain.KindForward {
+		enterAction = "Enter/Space toggle"
 	}
 	return "click tabs/select | a add | d detail | e edit | Del/x delete | / filter | r reload | " + enterAction + " | q/F10 quit"
 }
@@ -422,8 +440,22 @@ func (a *App) renderList(w, h int) {
 		if i == a.cursor {
 			style = style.Background(tcell.ColorDarkSlateGray)
 		}
-		line := formatListRow(item.ID, item.Label, item.UpdatedAt.Format(time.RFC3339), idWidth, labelWidth, updatedWidth)
+		line := formatListRow(item.ID, a.displayRecordLabel(a.currentKind(), item), item.UpdatedAt.Format(time.RFC3339), idWidth, labelWidth, updatedWidth)
 		drawText(a.screen, 0, 2+i, style, truncate(line, w))
+	}
+}
+
+func (a *App) displayRecordLabel(kind domain.DocumentKind, item store.DocumentSummary) string {
+	if kind != domain.KindForward {
+		return item.Label
+	}
+	switch {
+	case a.runningForwards != nil && a.runningForwards[item.ID] != nil:
+		return "[running] " + item.Label
+	case a.forwardErrors != nil && a.forwardErrors[item.ID] != "":
+		return "[error] " + item.Label
+	default:
+		return "[stopped] " + item.Label
 	}
 }
 
@@ -537,6 +569,20 @@ func (a *App) collectSessionUpdates() {
 	a.transitionSessionFocus(previous, a.currentSession())
 }
 
+func (a *App) collectForwardUpdates() {
+	for id, running := range a.runningForwards {
+		select {
+		case err := <-running.Done():
+			delete(a.runningForwards, id)
+			if err != nil {
+				a.forwardErrors[id] = err.Error()
+				a.status = err.Error()
+			}
+		default:
+		}
+	}
+}
+
 func (a *App) currentKind() domain.DocumentKind {
 	if a.activeTab >= len(a.tabs) {
 		return domain.DocumentKind("sessions")
@@ -589,6 +635,45 @@ func (a *App) openSelectedHostSession(ctx context.Context) error {
 	a.setActiveSession(len(a.sessions) - 1)
 	a.resetCursorBlink()
 	return nil
+}
+
+func (a *App) toggleSelectedForward(ctx context.Context) error {
+	record := a.selectedRecord()
+	if record.ID == "" {
+		return nil
+	}
+	if a.runningForwards == nil {
+		a.runningForwards = map[string]*service.RunningForward{}
+	}
+	if a.forwardErrors == nil {
+		a.forwardErrors = map[string]string{}
+	}
+	if running := a.runningForwards[record.ID]; running != nil {
+		if err := running.Close(); err != nil {
+			a.forwardErrors[record.ID] = err.Error()
+			return err
+		}
+		delete(a.runningForwards, record.ID)
+		delete(a.forwardErrors, record.ID)
+		a.status = fmt.Sprintf("Stopped forward %q.", record.Label)
+		return nil
+	}
+	delete(a.forwardErrors, record.ID)
+	running, err := a.connector.StartForward(ctx, record.ID, a.sessionPrompts(ctx))
+	if err != nil {
+		a.forwardErrors[record.ID] = err.Error()
+		return err
+	}
+	a.runningForwards[record.ID] = running
+	a.status = fmt.Sprintf("Started forward %q.", record.Label)
+	return nil
+}
+
+func (a *App) closeRunningForwards() {
+	for id, running := range a.runningForwards {
+		_ = running.Close()
+		delete(a.runningForwards, id)
+	}
 }
 
 func (a *App) forwardSessionKey(ev *tcell.EventKey) error {
@@ -1279,6 +1364,7 @@ func (a *App) runBlockingPromptLoop(ctx context.Context) error {
 				a.cursorBlinkAt = now.Add(500 * time.Millisecond)
 			}
 			a.collectSessionUpdates()
+			a.collectForwardUpdates()
 		case ev := <-a.events:
 			if err := a.handlePromptEvent(ctx, ev); err != nil {
 				return err
