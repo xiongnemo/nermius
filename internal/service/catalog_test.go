@@ -110,6 +110,47 @@ func TestSaveHostNormalizesDirectPassword(t *testing.T) {
 	}
 }
 
+func TestSaveForwardRequiresTargetForLocalAndRemote(t *testing.T) {
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	forward := &domain.Forward{
+		Name:       "db",
+		Type:       domain.ForwardLocal,
+		ListenPort: 15432,
+		Enabled:    true,
+	}
+	if err := catalog.SaveForward(context.Background(), forward); err == nil {
+		t.Fatal("expected local forward without target to be rejected")
+	}
+
+	forward.TargetHost = "db.internal"
+	forward.TargetPort = 5432
+	if err := catalog.SaveForward(context.Background(), forward); err != nil {
+		t.Fatalf("SaveForward with target failed: %v", err)
+	}
+
+	remote := &domain.Forward{
+		Name:       "reverse-api",
+		Type:       domain.ForwardRemote,
+		ListenPort: 18080,
+		Enabled:    true,
+	}
+	if err := catalog.SaveForward(context.Background(), remote); err == nil {
+		t.Fatal("expected remote forward without target to be rejected")
+	}
+
+	dynamic := &domain.Forward{
+		Name:       "socks",
+		Type:       domain.ForwardDynamic,
+		ListenPort: 1080,
+		Enabled:    true,
+	}
+	if err := catalog.SaveForward(context.Background(), dynamic); err != nil {
+		t.Fatalf("dynamic forward without target should be allowed: %v", err)
+	}
+}
+
 func TestFindReferencesIncludesHostProfileAndIdentityRelations(t *testing.T) {
 	catalog, cleanup := newTestCatalog(t)
 	defer cleanup()

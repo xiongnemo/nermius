@@ -153,6 +153,14 @@ func (c *Catalog) SaveForward(ctx context.Context, forward *domain.Forward) erro
 	if forward.ListenPort == 0 {
 		return errors.New("listen_port is required")
 	}
+	if forward.Type == domain.ForwardLocal || forward.Type == domain.ForwardRemote {
+		if strings.TrimSpace(forward.TargetHost) == "" {
+			return errors.New("target_host is required")
+		}
+		if forward.TargetPort == 0 {
+			return errors.New("target_port is required")
+		}
+	}
 	return c.withWriteKey(ctx, func(writeKey []byte) error {
 		if err := c.ensureLoaded(ctx); err != nil {
 			return err

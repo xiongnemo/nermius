@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -734,7 +735,7 @@ func (a *App) buildKeyForm(ctx context.Context, id string, isNew bool) (*formMod
 }
 
 func (a *App) buildForwardForm(ctx context.Context, id string, isNew bool) (*formModal, error) {
-	forward := &domain.Forward{Enabled: true}
+	forward := &domain.Forward{Type: domain.ForwardLocal, ListenHost: "127.0.0.1", Enabled: true}
 	if !isNew {
 		var err error
 		forward, err = a.catalog.GetForward(ctx, id)
@@ -753,8 +754,8 @@ func (a *App) buildForwardForm(ctx context.Context, id string, isNew bool) (*for
 			{key: "type", label: "Type", kind: fieldKindEnum, value: string(forward.Type), options: []string{string(domain.ForwardLocal), string(domain.ForwardRemote), string(domain.ForwardDynamic)}},
 			{key: "listen_host", label: "Listen Host", kind: fieldKindText, value: forward.ListenHost},
 			{key: "listen_port", label: "Listen Port", kind: fieldKindInt, required: true, value: strconv.Itoa(forward.ListenPort)},
-			{key: "target_host", label: "Target Host", kind: fieldKindText, value: forward.TargetHost, visible: visibleWhenForwardTarget},
-			{key: "target_port", label: "Target Port", kind: fieldKindInt, value: optionalIntString(forward.TargetPort), visible: visibleWhenForwardTarget},
+			{key: "target_host", label: "Target Host", kind: fieldKindText, required: true, value: forward.TargetHost, visible: visibleWhenForwardTarget},
+			{key: "target_port", label: "Target Port", kind: fieldKindInt, required: true, value: optionalIntString(forward.TargetPort), visible: visibleWhenForwardTarget},
 			{key: "auto_start", label: "Auto Start", kind: fieldKindBool, boolValue: forward.AutoStart},
 			{key: "enabled", label: "Enabled", kind: fieldKindBool, boolValue: forward.Enabled},
 		},
@@ -764,15 +765,28 @@ func (a *App) buildForwardForm(ctx context.Context, id string, isNew bool) (*for
 		if err != nil {
 			return err
 		}
+		forwardType := domain.ForwardType(formValue(form, "type"))
+		targetHost := ""
+		targetPort := 0
+		if forwardType == domain.ForwardLocal || forwardType == domain.ForwardRemote {
+			targetHost = strings.TrimSpace(formValue(form, "target_host"))
+			if targetHost == "" {
+				return errors.New("target host is required")
+			}
+			targetPort, err = parseRequiredInt(formValue(form, "target_port"), "target port")
+			if err != nil {
+				return err
+			}
+		}
 		forward := domain.Forward{
 			ID:          form.id,
 			Name:        strings.TrimSpace(formValue(form, "name")),
 			Description: formValue(form, "description"),
-			Type:        domain.ForwardType(formValue(form, "type")),
+			Type:        forwardType,
 			ListenHost:  formValue(form, "listen_host"),
 			ListenPort:  listenPort,
-			TargetHost:  formValue(form, "target_host"),
-			TargetPort:  parseOptionalInt(formValue(form, "target_port")),
+			TargetHost:  targetHost,
+			TargetPort:  targetPort,
 			AutoStart:   formBool(form, "auto_start"),
 			Enabled:     formBool(form, "enabled"),
 		}

@@ -133,6 +133,28 @@ func TestPromptTextModalUsesTUIScreenEvents(t *testing.T) {
 	}
 }
 
+func TestNewForwardFormDefaultsToLocalWithTargetFields(t *testing.T) {
+	app, cleanup := newTestAppWithCatalog(t)
+	defer cleanup()
+
+	form, err := app.buildForwardForm(context.Background(), "", true)
+	if err != nil {
+		t.Fatalf("buildForwardForm returned error: %v", err)
+	}
+	typeField := formFieldByKey(form, "type")
+	if typeField == nil || typeField.value != string(domain.ForwardLocal) {
+		t.Fatalf("expected new forward type to default to local, got %#v", typeField)
+	}
+	listenHost := formFieldByKey(form, "listen_host")
+	if listenHost == nil || listenHost.value != "127.0.0.1" {
+		t.Fatalf("expected listen host default 127.0.0.1, got %#v", listenHost)
+	}
+	targetHost := formFieldByKey(form, "target_host")
+	if targetHost == nil || targetHost.visible == nil || !targetHost.visible(form) {
+		t.Fatal("expected target host to be visible for default local forward")
+	}
+}
+
 func newTestAppWithCatalog(t *testing.T) (*App, func()) {
 	t.Helper()
 	paths := testPaths(t)

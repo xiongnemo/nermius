@@ -88,6 +88,7 @@ Inside the TUI object tabs:
 - `Delete` or `x` opens delete confirmation; referenced objects are blocked and show who still depends on them
 - `/` opens a filter prompt for the current tab, and `r` reloads the lists
 - reference fields use searchable pickers, and ordered lists such as profiles, forwards, known-host host patterns, and identity auth methods use a dedicated list editor
+- `FORWARD` objects are reusable `-L`/`-R`/`-D` definitions; attach them from a `HOST` or `PROFILE` edit form through the `Forwards` picker
 
 Inside the TUI session view:
 
@@ -266,6 +267,20 @@ Host:
   "key_ref": "key-uuid",
   "password": "super-secret",
   "forward_ids": ["forward-uuid"]
+}
+```
+
+Forward:
+
+```json
+{
+  "name": "prod-db",
+  "type": "local",
+  "listen_host": "127.0.0.1",
+  "listen_port": 15432,
+  "target_host": "db.internal",
+  "target_port": 5432,
+  "enabled": true
 }
 ```
 
