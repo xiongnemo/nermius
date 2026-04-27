@@ -4,6 +4,8 @@ import (
 	"io"
 	"log"
 	"sync"
+
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -19,6 +21,8 @@ const (
 	attrItalic
 	attrBlink
 	attrWrap
+	attrWide
+	attrWideTrail
 )
 
 const (
@@ -317,15 +321,33 @@ var gfxCharTable = [62]rune{
 }
 
 func (t *State) setChar(c rune, attr *Glyph, x, y int) {
+	t.setCharWidth(c, attr, x, y, runeCellWidth(c))
+}
+
+func (t *State) setCharWidth(c rune, attr *Glyph, x, y, width int) {
 	if attr.Mode&attrGfx != 0 {
 		if c >= 0x41 && c <= 0x7e && gfxCharTable[c-0x41] != 0 {
 			c = gfxCharTable[c-0x41]
 		}
 	}
+	if width < 1 {
+		width = 1
+	}
+	if width > 2 {
+		width = 2
+	}
 	t.changed |= ChangedScreen
 	t.dirty[y] = true
+	t.clearWideAt(x, y)
+	if width == 2 && x+1 < t.cols {
+		t.clearWideAt(x+1, y)
+	}
 	t.lines[y][x] = *attr
 	t.lines[y][x].Char = c
+	t.lines[y][x].Mode &^= attrWide | attrWideTrail
+	if width == 2 {
+		t.lines[y][x].Mode |= attrWide
+	}
 	//if t.options.BrightBold && attr.Mode&attrBold != 0 && attr.FG < 8 {
 	if attr.Mode&attrBold != 0 && attr.FG < 8 {
 		t.lines[y][x].FG = attr.FG + 8
@@ -334,6 +356,39 @@ func (t *State) setChar(c rune, attr *Glyph, x, y int) {
 		t.lines[y][x].FG = attr.BG
 		t.lines[y][x].BG = attr.FG
 	}
+	if width == 2 && x+1 < t.cols {
+		trail := t.lines[y][x]
+		trail.Char = 0
+		trail.Mode &^= attrWide
+		trail.Mode |= attrWideTrail
+		t.lines[y][x+1] = trail
+	}
+}
+
+func (t *State) clearWideAt(x, y int) {
+	if x < 0 || x >= t.cols || y < 0 || y >= t.rows {
+		return
+	}
+	cell := t.lines[y][x]
+	switch {
+	case cell.Mode&attrWideTrail != 0 && x > 0:
+		t.lines[y][x-1] = t.blankGlyph()
+		t.lines[y][x] = t.blankGlyph()
+	case cell.Mode&attrWide != 0 && x+1 < t.cols:
+		t.lines[y][x] = t.blankGlyph()
+		t.lines[y][x+1] = t.blankGlyph()
+	}
+}
+
+func runeCellWidth(c rune) int {
+	width := uniseg.StringWidth(string(c))
+	if width < 1 {
+		return 1
+	}
+	if width > 2 {
+		return 2
+	}
+	return width
 }
 
 func (t *State) defaultCursor() Cursor {

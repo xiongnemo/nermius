@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/uniseg"
 
 	"github.com/nermius/nermius/internal/clipboard"
 	"github.com/nermius/nermius/internal/config"
@@ -583,7 +584,7 @@ func (a *App) renderSessions(w, h int) {
 			}
 			ch := cell.Char
 			if ch == 0 {
-				ch = ' '
+				continue
 			}
 			a.screen.SetContent(x, y+2, ch, nil, style)
 		}
@@ -1198,9 +1199,25 @@ func (a *App) recordClick(kind domain.DocumentKind, index int, now time.Time) {
 }
 
 func drawText(screen tcell.Screen, x, y int, style tcell.Style, value string) {
-	for i, ch := range value {
-		screen.SetContent(x+i, y, ch, nil, style)
+	col := x
+	for _, ch := range value {
+		if ch == 0 {
+			continue
+		}
+		screen.SetContent(col, y, ch, nil, style)
+		col += displayRuneWidth(ch)
 	}
+}
+
+func displayRuneWidth(ch rune) int {
+	width := uniseg.StringWidth(string(ch))
+	if width < 1 {
+		return 1
+	}
+	if width > 2 {
+		return 2
+	}
+	return width
 }
 
 func fillRow(screen tcell.Screen, y, width int, style tcell.Style) {

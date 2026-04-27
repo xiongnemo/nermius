@@ -23,9 +23,15 @@ func (t *State) parse(c rune) {
 		t.logln("insert mode not implemented")
 	}
 
-	t.setChar(c, &t.cur.Attr, t.cur.X, t.cur.Y)
-	if t.cur.X+1 < t.cols {
-		t.moveTo(t.cur.X+1, t.cur.Y)
+	width := runeCellWidth(c)
+	if width == 2 && t.cur.X == t.cols-1 && t.mode&ModeWrap != 0 {
+		t.lines[t.cur.Y][t.cur.X].Mode |= attrWrap
+		t.newline(true)
+	}
+	t.setCharWidth(c, &t.cur.Attr, t.cur.X, t.cur.Y, width)
+	nextX := t.cur.X + width
+	if nextX < t.cols {
+		t.moveTo(nextX, t.cur.Y)
 	} else {
 		t.cur.State |= cursorWrapNext
 	}

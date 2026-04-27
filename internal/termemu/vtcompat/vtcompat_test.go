@@ -69,3 +69,49 @@ func TestScrollbackCapturesNormalScreenOnly(t *testing.T) {
 		t.Fatalf("expected alt screen writes to avoid normal scrollback, got %d", term.ScrollbackRows())
 	}
 }
+
+func TestWideRunesAdvanceByCellWidth(t *testing.T) {
+	term := New(WithSize(12, 3))
+	if _, err := term.Write([]byte("地址: 中国")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	tests := []struct {
+		x    int
+		want rune
+	}{
+		{0, '地'},
+		{1, 0},
+		{2, '址'},
+		{3, 0},
+		{4, ':'},
+		{5, ' '},
+		{6, '中'},
+		{7, 0},
+		{8, '国'},
+		{9, 0},
+	}
+	for _, tt := range tests {
+		if got := term.Cell(tt.x, 0).Char; got != tt.want {
+			t.Fatalf("cell %d = %q, want %q", tt.x, got, tt.want)
+		}
+	}
+	if cursor := term.Cursor(); cursor.X != 10 || cursor.Y != 0 {
+		t.Fatalf("cursor = (%d,%d), want (10,0)", cursor.X, cursor.Y)
+	}
+}
+
+func TestWideRuneWrapsBeforeLastColumn(t *testing.T) {
+	term := New(WithSize(4, 3))
+	if _, err := term.Write([]byte("abc中")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if got := term.Cell(3, 0).Char; got != ' ' {
+		t.Fatalf("last cell before wrap = %q, want blank", got)
+	}
+	if got := term.Cell(0, 1).Char; got != '中' {
+		t.Fatalf("wrapped wide cell = %q, want 中", got)
+	}
+	if got := term.Cell(1, 1).Char; got != 0 {
+		t.Fatalf("wrapped wide trail = %q, want 0", got)
+	}
+}

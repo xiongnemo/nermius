@@ -89,7 +89,7 @@ func extractSelection(term termemu.Terminal, selection sessionSelection) string 
 		for x := rowStart; x <= rowEnd; x++ {
 			ch := cellAt(term, selection.HistoryRows, x, y).Char
 			if ch == 0 {
-				ch = ' '
+				continue
 			}
 			b.WriteRune(ch)
 		}

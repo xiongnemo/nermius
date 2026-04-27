@@ -88,6 +88,26 @@ func TestSessionSelectionExtractionAcrossRows(t *testing.T) {
 	}
 }
 
+func TestSessionSelectionSkipsWideRuneTrailCells(t *testing.T) {
+	term := termemu.New(12, 2)
+	if _, err := term.Write([]byte("地址: 中国")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	session := &service.EmbeddedSession{Name: "test", Terminal: term}
+	selection := sessionSelection{
+		Session:     session,
+		Anchor:      cellPos{X: 0, Y: 0},
+		Focus:       cellPos{X: 9, Y: 0},
+		Active:      true,
+		HistoryRows: 0,
+	}
+	got := extractSelection(term, selection)
+	want := "地址: 中国"
+	if got != want {
+		t.Fatalf("extractSelection(wide) = %q, want %q", got, want)
+	}
+}
+
 func TestSelectionExtractionIncludesScrollback(t *testing.T) {
 	term := termemu.New(4, 2)
 	if _, err := term.Write([]byte("ab\r\ncd\r\nef")); err != nil {
