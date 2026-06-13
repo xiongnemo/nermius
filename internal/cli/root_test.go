@@ -216,6 +216,38 @@ func TestCompletionSuggestsForwardStartSubcommand(t *testing.T) {
 	}
 }
 
+func TestTermiusHelpIncludesExportAndImport(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"termius", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(termius --help) returned error: %v", err)
+	}
+	help := out.String()
+	if !bytes.Contains([]byte(help), []byte("export")) || !bytes.Contains([]byte(help), []byte("import")) {
+		t.Fatalf("expected termius help to include export and import, got:\n%s", help)
+	}
+	if !bytes.Contains([]byte(help), []byte("Linux and macOS")) {
+		t.Fatalf("expected termius help to mention unsupported Linux and macOS local export, got:\n%s", help)
+	}
+}
+
+func TestCompletionSuggestsTermiusExportSubcommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "termius", "ex"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete termius ex) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("export")) {
+		t.Fatalf("expected completion to suggest export, got:\n%s", out.String())
+	}
+}
+
 func newCLITestCatalog(t *testing.T) (*service.Catalog, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vault.db")

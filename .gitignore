@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Sensitive Termius plaintext exports
+termius-*.json
+
 # Editor/IDE
 # .idea/
 # .vscode/

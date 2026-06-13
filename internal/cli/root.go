@@ -61,6 +61,7 @@ func newRootCommand(rt *runtime) *cobra.Command {
 		rt.newResourceCmd(domain.KindForward),
 		rt.newInspectCmd(),
 		rt.newImportCmd(),
+		rt.newTermiusCmd(),
 		rt.newConnectCmd(),
 		rt.newExecCmd(),
 		rt.newTUICmd(),

@@ -11,6 +11,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
 - Saved host key inspection with `known-host list|delete`
 - Resolved host inspection with `inspect <host>`
 - OpenSSH import via `import openssh --config ~/.ssh/config`
+- Termius local export/import via `termius export|import`
 - Host-level direct key/password auth overrides
 - SSH connect flow with:
   - password, private key, and ssh-agent auth
@@ -73,6 +74,13 @@ nermius tui
 ```
 
 `import openssh` and the interactive `add -it` flow are alternative ways to populate the vault. Use whichever matches your setup.
+
+If you are moving from Termius Desktop on Windows, export every locally decryptable object before importing the normalized credentials:
+
+```powershell
+nermius termius export --out termius-export.json --include-secrets
+nermius termius import --file termius-export.json
+```
 
 Normal read/write commands now auto-unlock:
 
@@ -242,6 +250,34 @@ You can override storage per host or profile through the `known_hosts` object:
 ```
 
 Use `backend: "vault"` if you want the host to stay fully self-contained on machines that do not even have OpenSSH installed.
+
+## Termius Export And Import
+
+`nermius termius export` reads the local Termius Desktop data directory, decrypts every locally decryptable payload, and writes a bundle with both parsed `raw_objects` and a normalized credentials view. Chromium IndexedDB records are read with an `idb_cmp1`-compatible comparator and decoded object-store metadata, so field-level encrypted values keep their record boundary, Termius table name in `raw_objects[].store_name`, and recoverable field name in `raw_objects[].field`. JSON payloads are parsed as objects or scalar values. Non-JSON decrypted text is still preserved and classified as passwords, passphrases, private keys, public keys, snippet scripts, secret text, or generic text. The bundle also includes a Termius file backup section so data that is not yet understood by Nermius is still preserved.
+
+```powershell
+# Inventory only: no decrypted secret values are written.
+nermius termius export --out termius-inventory.json
+
+# Full export: includes raw JSON values, the Termius localKey, and base64 copies of Termius data files.
+nermius termius export --out termius-export.json --include-secrets
+
+# Maximum fidelity backup: keep raw objects only, even if Nermius does not understand them yet.
+nermius termius export --out termius-raw.json --raw-only --include-secrets
+
+# Import normalized credentials into the encrypted Nermius vault.
+nermius termius import --file termius-export.json
+
+# Read local Termius and import directly without writing a plaintext bundle.
+nermius termius import --from-local --dry-run
+nermius termius import --from-local
+```
+
+The full export file is sensitive plaintext. Treat it like a password manager export and remove it after importing unless you intentionally keep it as a backup. The `backup` section contains `IndexedDB/file__0.indexeddb.leveldb`, `Local Storage/leveldb`, `Cache/Cache_Data`, `Preferences`, `window-state.json`, and the Termius `localKey` when `--include-secrets` is set.
+
+Current Termius local key reading is implemented only for Windows Credential Manager and looks for the Termius `localKey`. Linux and macOS local Termius export, and `termius import --from-local`, are not supported yet. You can override the Termius data root or pass a specific LevelDB directory with `--source-dir`; the default is `%APPDATA%\Termius` on Windows. Close Termius before exporting for the cleanest backup. If Termius is still running, Nermius copies LevelDB directories to a temporary location before trying to read them.
+
+Import only writes normalized credentials that Nermius can map safely today: hosts, groups, identities, private keys, and passphrases. Export reconstructs these from Termius stores such as `hosts`, `groups`, `tags`, `ssh_identities`, `keys`, and `snippets` using Termius' own encrypted field names. Standalone decrypted secrets without a recovered store and field remain in `raw_objects` as `secret_text` candidates instead of being guessed into password fields. Port forwards, snippets, activity history, known hosts, and unknown Termius objects remain preserved in `raw_objects` and the `backup` section so future import logic can be improved without re-reading Termius.
 
 ## Debug Logging
 
