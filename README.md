@@ -190,6 +190,18 @@ nermius install --yes
 - If a file with the same name already exists there, it compares size plus `SHA-256` and `SHA-512` before deciding whether a copy is needed.
 - If the install directory is not reachable from `PATH`, it prints a shell-specific hint for adding it.
 
+Linux release assets also include unsigned nFPM packages. Replace `amd64` with the package architecture you downloaded:
+
+```sh
+sudo dpkg -i nermius-linux-amd64.deb
+sudo rpm -Uvh nermius-linux-amd64.rpm
+sudo apk add --allow-untrusted nermius-linux-amd64.apk
+sudo pacman -U nermius-linux-amd64.pkg.tar.zst
+sudo opkg install nermius-linux-amd64.ipk
+```
+
+These packages install `nermius` to `/usr/bin/nermius`. Release assets do not include apt, yum, apk, pacman, or opkg repository indexes yet.
+
 ## Vault Security
 
 `vault init` still bootstraps the vault with a master password. That master password derives a KEK which wraps the random `vaultKey`; the `vaultKey` is what encrypts the actual vault records.

@@ -15,13 +15,15 @@ permissions:
 env:
   BINARY_NAME: nermius
   CGO_ENABLED: "0"
+  GOPROXY: https://goproxy.cn,direct
 
 jobs:
   targets:
     name: Prepare Target Matrix
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.generate.outputs.matrix }}
+      build_matrix: ${{ steps.generate.outputs.build_matrix }}
+      package_matrix: ${{ steps.generate.outputs.package_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,7 +35,7 @@ jobs:
           cache: false
 
       - id: generate
-        name: Generate standalone target matrix
+        name: Generate target matrices
         shell: bash
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
@@ -47,48 +49,93 @@ jobs:
           # releases may add extra targets such as freebsd/riscv64 that would
           # otherwise start failing the workflow automatically.
           allowed_targets = [
-              "darwin/amd64",
-              "darwin/arm64",
-              "linux/386",
-              "linux/amd64",
-              "linux/arm",
-              "linux/arm64",
-              "linux/loong64",
-              "linux/riscv64",
-              "openbsd/amd64",
-              "openbsd/arm64",
-              "windows/386",
-              "windows/amd64",
-              "windows/arm64",
+              {"goos": "darwin", "goarch": "amd64"},
+              {"goos": "darwin", "goarch": "arm64"},
+              {"goos": "linux", "goarch": "386"},
+              {"goos": "linux", "goarch": "amd64"},
+              {"goos": "linux", "goarch": "arm", "goarm": "6", "arch": "armv6"},
+              {"goos": "linux", "goarch": "arm", "goarm": "7", "arch": "armv7"},
+              {"goos": "linux", "goarch": "arm64"},
+              {"goos": "linux", "goarch": "loong64"},
+              {"goos": "linux", "goarch": "riscv64"},
+              {"goos": "openbsd", "goarch": "amd64"},
+              {"goos": "openbsd", "goarch": "arm64"},
+              {"goos": "windows", "goarch": "386"},
+              {"goos": "windows", "goarch": "amd64"},
+              {"goos": "windows", "goarch": "arm64"},
           ]
 
-          targets = []
+          build_targets = []
           available_targets = set(subprocess.check_output(["go", "tool", "dist", "list"], text=True).splitlines())
           for target in allowed_targets:
-              if target not in available_targets:
+              goos = target["goos"]
+              goarch = target["goarch"]
+              if f"{goos}/{goarch}" not in available_targets:
                   continue
-              goos, goarch = target.split("/", 1)
+              arch = target.get("arch", goarch)
+              goarm = target.get("goarm", "")
+              target_name = f"{goos}/{arch}"
               ext = ".exe" if goos == "windows" else ""
-              artifact = f"{binary_name}-{goos}-{goarch}"
+              artifact = f"{binary_name}-{goos}-{arch}"
               archive = f"{artifact}.tar.gz"
-              targets.append({
+              build_targets.append({
+                  "target": target_name,
                   "goos": goos,
                   "goarch": goarch,
+                  "goarm": goarm,
+                  "arch": arch,
                   "ext": ext,
                   "artifact": artifact,
                   "archive": archive,
               })
 
-          print(f"matrix={json.dumps({'include': targets})}")
+          linux_arches = [target["arch"] for target in build_targets if target["goos"] == "linux"]
+          linux_arch_set = set(linux_arches)
+          package_arches = {
+              "deb": {"386", "amd64", "armv7", "arm64", "riscv64"},
+              "ipk": {"386", "amd64", "armv7", "arm64", "riscv64"},
+              "rpm": linux_arch_set,
+              "apk": linux_arch_set,
+              "archlinux": linux_arch_set - {"loong64"},
+          }
+          package_extensions = {
+              "deb": "deb",
+              "ipk": "ipk",
+              "rpm": "rpm",
+              "apk": "apk",
+              "archlinux": "pkg.tar.zst",
+          }
+          nfpm_arches = {
+              "armv6": "arm6",
+              "armv7": "arm7",
+          }
+
+          package_targets = []
+          for packager in ["deb", "rpm", "apk", "archlinux", "ipk"]:
+              for arch in linux_arches:
+                  if arch not in package_arches[packager]:
+                      continue
+                  extension = package_extensions[packager]
+                  package_targets.append({
+                      "packager": packager,
+                      "arch": arch,
+                      "nfpm_arch": nfpm_arches.get(arch, arch),
+                      "extension": extension,
+                      "source_artifact": f"{binary_name}-linux-{arch}",
+                      "asset": f"{binary_name}-linux-{arch}.{extension}",
+                  })
+
+          print(f"build_matrix={json.dumps({'include': build_targets}, separators=(',', ':'))}")
+          print(f"package_matrix={json.dumps({'include': package_targets}, separators=(',', ':'))}")
           PY
 
   build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: Build ${{ matrix.target }}
     needs: targets
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.targets.outputs.build_matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,6 +151,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
           EXT: ${{ matrix.ext }}
           ARTIFACT: ${{ matrix.artifact }}
           ARCHIVE: ${{ matrix.archive }}
@@ -148,9 +196,66 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  package:
+    name: Package ${{ matrix.packager }} ${{ matrix.arch }}
+    needs:
+      - targets
+      - build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.targets.outputs.package_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nFPM
+        shell: bash
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
+
+      - name: Download Linux binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.source_artifact }}
+          path: dist/artifacts
+
+      - name: Build package
+        shell: bash
+        env:
+          PACKAGER: ${{ matrix.packager }}
+          SOURCE_ARTIFACT: ${{ matrix.source_artifact }}
+          ASSET: ${{ matrix.asset }}
+          NFPM_ARCH: ${{ matrix.nfpm_arch }}
+        run: |
+          mkdir -p dist/package-input dist/packages
+          tar -xzf "dist/artifacts/${SOURCE_ARTIFACT}.tar.gz" -C dist/package-input
+          binary_path="dist/package-input/${SOURCE_ARTIFACT}"
+          chmod 0755 "${binary_path}"
+          eval "$(bash scripts/compute-version.sh)"
+          export NFPM_VERSION="${base_version#v}"
+          export NFPM_ARCH
+          export NFPM_BINARY="${PWD}/${binary_path}"
+          nfpm package --config nfpm.yaml --packager "${PACKAGER}" --target "dist/packages/${ASSET}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.packager }}-${{ matrix.arch }}
+          path: dist/packages/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
   prerelease:
     name: Publish Dev Prerelease
-    needs: build
+    needs:
+      - build
+      - package
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     permissions:
@@ -184,7 +289,13 @@ jobs:
           name: ${{ steps.meta.outputs.name }}
           prerelease: true
           generate_release_notes: true
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            dist/*.apk
+            dist/*.ipk
+            dist/*.pkg.tar.zst
           body: |
             Automated prerelease build from `dev`.
             

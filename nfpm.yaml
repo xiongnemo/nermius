@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+name: nermius
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+version_schema: semver
+release: "1"
+section: utils
+priority: optional
+maintainer: xiongnemo <xiongnemo@users.noreply.github.com>
+description: Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tcell TUI.
+vendor: xiongnemo
+homepage: https://github.com/xiongnemo/nermius
+license: LicenseRef-Unknown
+disable_globbing: true
+contents:
+  - src: ${NFPM_BINARY}
+    dst: /usr/bin/nermius
+    expand: true
+    file_info:
+      mode: 0755
