@@ -364,6 +364,8 @@ func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, erro
 			}
 		case 'g':
 			a.openSFTPPathPrompt(ctx)
+		case '/':
+			a.openSFTPSearchPrompt()
 		case 'l':
 			a.setActiveSFTPPaneLocal(ctx)
 		case 'u':
@@ -430,7 +432,15 @@ func (a *App) moveSFTPCursor(delta int) {
 		return
 	}
 	pane := &a.sftp.panes[a.sftp.activePane]
-	pane.cursor = clampInt(pane.cursor+delta, 0, max(0, len(pane.entries)-1))
+	if len(pane.entries) == 0 {
+		pane.cursor = 0
+		return
+	}
+	next := (pane.cursor + delta) % len(pane.entries)
+	if next < 0 {
+		next += len(pane.entries)
+	}
+	pane.cursor = next
 }
 
 func (a *App) enterSFTPEntry(ctx context.Context) error {
@@ -512,6 +522,54 @@ func (a *App) openSFTPPathPrompt(ctx context.Context) {
 			}
 		}),
 	})
+}
+
+func (a *App) openSFTPSearchPrompt() {
+	pane := a.activeSFTPPane()
+	if pane == nil || !pane.configured() {
+		a.status = "Configure this SFTP pane first."
+		return
+	}
+	if len(pane.entries) == 0 {
+		a.status = "No SFTP entries to search."
+		return
+	}
+	a.pushModal(modalState{
+		kind: modalKindTextInput,
+		textInput: newTextInputModal("Search SFTP entry", "", false, false, func(app *App, input string) {
+			query := strings.TrimSpace(input)
+			if query == "" {
+				return
+			}
+			pane := app.activeSFTPPane()
+			if pane == nil || len(pane.entries) == 0 {
+				return
+			}
+			if index, ok := findSFTPEntry(pane, query); ok {
+				pane.cursor = index
+				pane.scroll = index
+				app.status = fmt.Sprintf("Found %s.", pane.entries[index].Name)
+				return
+			}
+			app.status = fmt.Sprintf("No SFTP entry matches %q.", query)
+		}),
+	})
+}
+
+func findSFTPEntry(pane *sftpPaneState, query string) (int, bool) {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if pane == nil || query == "" || len(pane.entries) == 0 {
+		return 0, false
+	}
+	start := clampInt(pane.cursor, 0, len(pane.entries)-1)
+	for offset := 1; offset <= len(pane.entries); offset++ {
+		index := (start + offset) % len(pane.entries)
+		entry := pane.entries[index]
+		if strings.Contains(strings.ToLower(entry.Name), query) {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 func (a *App) setActiveSFTPPaneLocal(ctx context.Context) {

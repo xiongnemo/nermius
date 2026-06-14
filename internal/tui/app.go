@@ -496,7 +496,7 @@ func (a *App) footerPrompt() string {
 		if a.sftp == nil {
 			return "go to HOST and press s/[ / ] | F2 back | q/F10 quit"
 		}
-		return "Tab pane | l local | Enter open | Backspace parent | u upload | d download | n mkdir | x delete | R rename | g path | r refresh | c close | q/F10 quit"
+		return "Tab pane | l local | / search | Enter open | Backspace parent | u upload | d download | n mkdir | x delete | R rename | g path | r refresh | c close | q/F10 quit"
 	}
 	enterAction := "Enter detail"
 	if a.currentKind() == domain.KindHost {

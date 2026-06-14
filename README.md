@@ -128,7 +128,7 @@ Inside the TUI SFTP view:
 
 - each pane can be empty, local, or a remote host; `s` from `HOST` opens the quick layout with Local left and the selected remote host right
 - from `HOST`, `[` assigns the selected host to the left SFTP pane and `]` assigns it to the right pane; replacing a non-empty pane asks for confirmation
-- in SFTP, `Tab` switches panes, `l` makes an empty active pane local, `Enter` enters directories, `Backspace` goes to the parent directory, `g` jumps to a typed path, and `r` refreshes
+- in SFTP, `Tab` switches panes, arrow keys wrap at the top/bottom of the active pane, `l` makes an empty active pane local, `/` searches the active pane, `Enter` enters directories, `Backspace` goes to the parent directory, `g` jumps to a typed path, and `r` refreshes
 - `u` uploads from the local pane to the remote pane, and `d` downloads from the remote pane to the local pane; Local/Local and Remote/Remote transfer are not supported yet
 - remote `n` creates a directory, `x` or `Delete` removes a file or recursively removes a directory after confirmation, and `R` renames a remote path
 - file overwrite and remote delete actions require confirmation; v1 transfers regular files only, not whole directories

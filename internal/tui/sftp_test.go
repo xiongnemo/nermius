@@ -56,6 +56,29 @@ func TestSFTPTogglePaneAndCursorClamp(t *testing.T) {
 	}
 }
 
+func TestSFTPCursorWrapsAroundEntries(t *testing.T) {
+	app := &App{
+		sftp: &sftpBrowserState{
+			activePane: sftpPaneRight,
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneRight: {kind: sftpPaneRemote, entries: makeSFTPTestEntries("a", "b", "c")},
+			},
+		},
+	}
+	app.moveSFTPCursor(-1)
+	if app.sftp.panes[sftpPaneRight].cursor != 2 {
+		t.Fatalf("cursor after moving above top = %d, want 2", app.sftp.panes[sftpPaneRight].cursor)
+	}
+	app.moveSFTPCursor(1)
+	if app.sftp.panes[sftpPaneRight].cursor != 0 {
+		t.Fatalf("cursor after moving below bottom = %d, want 0", app.sftp.panes[sftpPaneRight].cursor)
+	}
+	app.moveSFTPCursor(4)
+	if app.sftp.panes[sftpPaneRight].cursor != 1 {
+		t.Fatalf("cursor after page delta = %d, want 1", app.sftp.panes[sftpPaneRight].cursor)
+	}
+}
+
 func TestSFTPPaneScrollFollowsCursor(t *testing.T) {
 	pane := &sftpPaneState{
 		kind:    sftpPaneRemote,
@@ -87,6 +110,52 @@ func TestSFTPPaneScrollFollowsCursor(t *testing.T) {
 	ensureSFTPCursorVisible(pane, 0)
 	if pane.cursor != 2 || pane.scroll != 1 {
 		t.Fatalf("zero rows cursor/scroll = %d/%d, want 2/1", pane.cursor, pane.scroll)
+	}
+}
+
+func TestFindSFTPEntrySearchesFromNextEntryAndWraps(t *testing.T) {
+	pane := &sftpPaneState{
+		kind:    sftpPaneRemote,
+		entries: makeSFTPTestEntries("alpha.log", "beta.txt", "gamma.log"),
+		cursor:  2,
+	}
+	index, ok := findSFTPEntry(pane, "LOG")
+	if !ok || index != 0 {
+		t.Fatalf("find log = %d/%v, want 0/true", index, ok)
+	}
+	pane.cursor = index
+	index, ok = findSFTPEntry(pane, "log")
+	if !ok || index != 2 {
+		t.Fatalf("find next log = %d/%v, want 2/true", index, ok)
+	}
+	if _, ok := findSFTPEntry(pane, "missing"); ok {
+		t.Fatal("expected missing search to fail")
+	}
+}
+
+func TestSFTPSlashOpensSearchPrompt(t *testing.T) {
+	app := &App{
+		sftp: &sftpBrowserState{
+			activePane: sftpPaneRight,
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneRight: {kind: sftpPaneRemote, entries: makeSFTPTestEntries("alpha", "beta")},
+			},
+		},
+	}
+	done, err := app.handleSFTPKey(context.Background(), tcell.NewEventKey(tcell.KeyRune, '/', tcell.ModNone))
+	if done || err != nil {
+		t.Fatalf("handleSFTPKey slash = done %v err %v", done, err)
+	}
+	if !app.hasModal() {
+		t.Fatal("expected search prompt modal")
+	}
+	top := app.topModal()
+	if top == nil || top.kind != modalKindTextInput || top.textInput == nil || top.textInput.title != "Search SFTP entry" {
+		t.Fatalf("top modal = %+v, want search text input", top)
+	}
+	top.textInput.onSave(app, "beta")
+	if app.sftp.panes[sftpPaneRight].cursor != 1 {
+		t.Fatalf("cursor after search = %d, want 1", app.sftp.panes[sftpPaneRight].cursor)
 	}
 }
 
