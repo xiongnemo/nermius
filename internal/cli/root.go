@@ -53,6 +53,7 @@ func newRootCommand(rt *runtime) *cobra.Command {
 		rt.newVaultCmd(),
 		rt.newInstallCmd(),
 		rt.newKnownHostsCmd(),
+		rt.newBackendCmd(),
 		rt.newResourceCmd(domain.KindHost),
 		rt.newResourceCmd(domain.KindGroup),
 		rt.newResourceCmd(domain.KindProfile),

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -213,6 +214,46 @@ func (c *Catalog) SaveKnownHost(ctx context.Context, knownHost *domain.KnownHost
 	})
 }
 
+func (c *Catalog) SaveBackend(ctx context.Context, backend *domain.Backend) error {
+	if strings.TrimSpace(backend.Name) == "" {
+		return errors.New("name is required")
+	}
+	if backend.Type == "" {
+		backend.Type = domain.BackendTypeTermix
+	}
+	if backend.Type != domain.BackendTypeTermix {
+		return fmt.Errorf("unsupported backend type %q", backend.Type)
+	}
+	normalizedURL, err := normalizeBackendURL(backend.URL)
+	if err != nil {
+		return err
+	}
+	backend.URL = normalizedURL
+	if strings.TrimSpace(backend.TargetProfileRef) != "" {
+		profileID, err := c.ResolveDocumentID(ctx, domain.KindProfile, backend.TargetProfileRef)
+		if err != nil {
+			return fmt.Errorf("target_profile_ref: %w", err)
+		}
+		backend.TargetProfileRef = profileID
+	}
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		if backend.Token != "" {
+			id, err := c.putSecretWithKey(ctx, writeKey, domain.SecretKindBackendToken, backend.TokenSecretID, []byte(backend.Token))
+			if err != nil {
+				return err
+			}
+			backend.TokenSecretID = id
+			backend.Token = ""
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindBackend, backend.ID, backend.Label(), backend, func(id string) { backend.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&backend.CreatedAt, &backend.UpdatedAt, now)
+		})
+	})
+}
+
 func (c *Catalog) GetHost(ctx context.Context, id string) (*domain.Host, error) {
 	var out domain.Host
 	if err := c.loadEntity(ctx, id, domain.KindHost, &out); err != nil {
@@ -264,6 +305,14 @@ func (c *Catalog) GetForward(ctx context.Context, id string) (*domain.Forward, e
 func (c *Catalog) GetKnownHost(ctx context.Context, id string) (*domain.KnownHost, error) {
 	var out domain.KnownHost
 	if err := c.loadEntity(ctx, id, domain.KindKnownHost, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Catalog) GetBackend(ctx context.Context, id string) (*domain.Backend, error) {
+	var out domain.Backend
+	if err := c.loadEntity(ctx, id, domain.KindBackend, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -321,6 +370,19 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 				refs = append(refs, DocumentReference{Kind: domain.KindHost, ID: host.ID, Label: host.Label(), Field: "forward_ids"})
 			}
 		}
+		if host.External != nil && host.External.BackendRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindHost, ID: host.ID, Label: host.Label(), Field: "external.backend_ref"})
+		}
+	}
+
+	groups, err := c.listGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, group := range groups {
+		if group.External != nil && group.External.BackendRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindGroup, ID: group.ID, Label: group.Label(), Field: "external.backend_ref"})
+		}
 	}
 
 	profiles, err := c.listProfiles(ctx)
@@ -348,6 +410,19 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 				refs = append(refs, DocumentReference{Kind: domain.KindIdentity, ID: identity.ID, Label: identity.Label(), Field: "methods.key_id"})
 			}
 		}
+		if identity.External != nil && identity.External.BackendRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindIdentity, ID: identity.ID, Label: identity.Label(), Field: "external.backend_ref"})
+		}
+	}
+
+	keys, err := c.listKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range keys {
+		if key.External != nil && key.External.BackendRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindKey, ID: key.ID, Label: key.Label(), Field: "external.backend_ref"})
+		}
 	}
 
 	forwards, err := c.listForwards(ctx)
@@ -357,6 +432,19 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 	for _, forward := range forwards {
 		if forward.HostRef == targetID {
 			refs = append(refs, DocumentReference{Kind: domain.KindForward, ID: forward.ID, Label: forward.Label(), Field: "host_ref"})
+		}
+		if forward.External != nil && forward.External.BackendRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindForward, ID: forward.ID, Label: forward.Label(), Field: "external.backend_ref"})
+		}
+	}
+
+	backends, err := c.listBackends(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, backend := range backends {
+		if backend.TargetProfileRef == targetID {
+			refs = append(refs, DocumentReference{Kind: domain.KindBackend, ID: backend.ID, Label: backend.Label(), Field: "target_profile_ref"})
 		}
 	}
 
@@ -396,6 +484,10 @@ func (c *Catalog) ListKnownHosts(ctx context.Context) ([]domain.KnownHost, error
 		out = append(out, knownHost)
 	}
 	return out, nil
+}
+
+func (c *Catalog) ListBackends(ctx context.Context) ([]domain.Backend, error) {
+	return c.listBackends(ctx)
 }
 
 func (c *Catalog) LoadKindByID(ctx context.Context, id string) (store.DocumentRecord, error) {
@@ -764,6 +856,22 @@ func (c *Catalog) listHosts(ctx context.Context) ([]domain.Host, error) {
 	return out, nil
 }
 
+func (c *Catalog) listGroups(ctx context.Context) ([]domain.Group, error) {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	recs := c.documentRecordsByKind(domain.KindGroup)
+	out := make([]domain.Group, 0, len(recs))
+	for _, rec := range recs {
+		var group domain.Group
+		if err := json.Unmarshal(rec.Body, &group); err != nil {
+			return nil, err
+		}
+		out = append(out, group)
+	}
+	return out, nil
+}
+
 func (c *Catalog) listProfiles(ctx context.Context) ([]domain.Profile, error) {
 	if err := c.ensureLoaded(ctx); err != nil {
 		return nil, err
@@ -796,6 +904,22 @@ func (c *Catalog) listIdentities(ctx context.Context) ([]domain.Identity, error)
 	return out, nil
 }
 
+func (c *Catalog) listKeys(ctx context.Context) ([]domain.Key, error) {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	recs := c.documentRecordsByKind(domain.KindKey)
+	out := make([]domain.Key, 0, len(recs))
+	for _, rec := range recs {
+		var key domain.Key
+		if err := json.Unmarshal(rec.Body, &key); err != nil {
+			return nil, err
+		}
+		out = append(out, key)
+	}
+	return out, nil
+}
+
 func (c *Catalog) listForwards(ctx context.Context) ([]domain.Forward, error) {
 	if err := c.ensureLoaded(ctx); err != nil {
 		return nil, err
@@ -808,6 +932,22 @@ func (c *Catalog) listForwards(ctx context.Context) ([]domain.Forward, error) {
 			return nil, err
 		}
 		out = append(out, forward)
+	}
+	return out, nil
+}
+
+func (c *Catalog) listBackends(ctx context.Context) ([]domain.Backend, error) {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	recs := c.documentRecordsByKind(domain.KindBackend)
+	out := make([]domain.Backend, 0, len(recs))
+	for _, rec := range recs {
+		var backend domain.Backend
+		if err := json.Unmarshal(rec.Body, &backend); err != nil {
+			return nil, err
+		}
+		out = append(out, backend)
 	}
 	return out, nil
 }
@@ -1017,9 +1157,32 @@ func currentID(v any) string {
 		return value.ID
 	case *domain.KnownHost:
 		return value.ID
+	case *domain.Backend:
+		return value.ID
 	default:
 		return ""
 	}
+}
+
+func normalizeBackendURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("url is required")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("backend url must use http or https: %s", raw)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("backend url must include a host: %s", raw)
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func knownHostDocumentLabel(hosts []string, algorithm string) string {

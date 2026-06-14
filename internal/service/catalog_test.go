@@ -176,6 +176,53 @@ func TestSaveForwardNormalizesHostRef(t *testing.T) {
 	}
 }
 
+func TestSaveBackendNormalizesTokenAndProfileRef(t *testing.T) {
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	profile := &domain.Profile{Name: "termix-lab"}
+	if err := catalog.SaveProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveProfile failed: %v", err)
+	}
+	backend := &domain.Backend{
+		Name:             "lab",
+		Type:             domain.BackendTypeTermix,
+		URL:              "http://localhost:8080/",
+		Token:            "tmx_secret",
+		TargetProfileRef: "termix-lab",
+	}
+	if err := catalog.SaveBackend(context.Background(), backend); err != nil {
+		t.Fatalf("SaveBackend failed: %v", err)
+	}
+	if backend.URL != "http://localhost:8080" {
+		t.Fatalf("expected normalized URL, got %q", backend.URL)
+	}
+	if backend.Token != "" {
+		t.Fatal("expected backend token to be cleared after save")
+	}
+	if backend.TokenSecretID == "" {
+		t.Fatal("expected token_secret_id to be populated")
+	}
+	if backend.TargetProfileRef != profile.ID {
+		t.Fatalf("expected target profile ref %s, got %s", profile.ID, backend.TargetProfileRef)
+	}
+
+	stored, err := catalog.GetBackend(context.Background(), backend.ID)
+	if err != nil {
+		t.Fatalf("GetBackend failed: %v", err)
+	}
+	if stored.Token != "" {
+		t.Fatal("expected persisted backend to omit plaintext token")
+	}
+	raw, err := catalog.OpenSecret(context.Background(), stored.TokenSecretID)
+	if err != nil {
+		t.Fatalf("OpenSecret failed: %v", err)
+	}
+	if string(raw) != "tmx_secret" {
+		t.Fatalf("unexpected backend token payload %q", string(raw))
+	}
+}
+
 func TestFindReferencesIncludesHostProfileAndIdentityRelations(t *testing.T) {
 	catalog, cleanup := newTestCatalog(t)
 	defer cleanup()
@@ -258,6 +305,54 @@ func TestFindReferencesIncludesHostProfileAndIdentityRelations(t *testing.T) {
 	}
 	if len(hostRefs) != 1 || hostRefs[0].Kind != domain.KindForward || hostRefs[0].Field != "host_ref" {
 		t.Fatalf("unexpected host refs: %#v", hostRefs)
+	}
+}
+
+func TestFindReferencesIncludesBackendRelations(t *testing.T) {
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	profile := &domain.Profile{Name: "termix-lab"}
+	if err := catalog.SaveProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveProfile failed: %v", err)
+	}
+	backend := &domain.Backend{
+		Name:             "lab",
+		Type:             domain.BackendTypeTermix,
+		URL:              "https://termix.example",
+		Token:            "tmx_secret",
+		TargetProfileRef: profile.ID,
+	}
+	if err := catalog.SaveBackend(context.Background(), backend); err != nil {
+		t.Fatalf("SaveBackend failed: %v", err)
+	}
+	host := &domain.Host{
+		Title:    "prod",
+		Hostname: "prod.example.com",
+		External: &domain.ExternalRef{
+			BackendRef: backend.ID,
+			Kind:       "ssh_data",
+			ID:         "remote-host-id",
+		},
+	}
+	if err := catalog.SaveHost(context.Background(), host); err != nil {
+		t.Fatalf("SaveHost failed: %v", err)
+	}
+
+	profileRefs, err := catalog.FindReferences(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatalf("FindReferences(profile) failed: %v", err)
+	}
+	if len(profileRefs) != 1 || profileRefs[0].Kind != domain.KindBackend || profileRefs[0].Field != "target_profile_ref" {
+		t.Fatalf("unexpected profile refs: %#v", profileRefs)
+	}
+
+	backendRefs, err := catalog.FindReferences(context.Background(), backend.ID)
+	if err != nil {
+		t.Fatalf("FindReferences(backend) failed: %v", err)
+	}
+	if len(backendRefs) != 1 || backendRefs[0].Kind != domain.KindHost || backendRefs[0].Field != "external.backend_ref" {
+		t.Fatalf("unexpected backend refs: %#v", backendRefs)
 	}
 }
 

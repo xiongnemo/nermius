@@ -12,6 +12,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
 - Resolved host inspection with `inspect <host>`
 - OpenSSH import via `import openssh --config ~/.ssh/config`
 - Termius local export/import via `termius export|import`
+- Termix backend registration via `backend termix add|list|show`
 - Host-level direct key/password auth overrides
 - SSH connect flow with:
   - password, private key, and ssh-agent auth
@@ -80,6 +81,13 @@ If you are moving from Termius Desktop on Windows, export every locally decrypta
 ```powershell
 nermius termius export --out termius-export.json --include-secrets
 nermius termius import --file termius-export.json
+```
+
+If you have a self-hosted Termix instance, register it as an optional backend and bind future sync imports to a local profile:
+
+```powershell
+nermius backend termix add lab --url http://localhost:8080 --token tmx_xxx --profile termix-lab --create-profile
+nermius backend termix list
 ```
 
 Normal read/write commands now auto-unlock:
@@ -250,6 +258,23 @@ You can override storage per host or profile through the `known_hosts` object:
 ```
 
 Use `backend: "vault"` if you want the host to stay fully self-contained on machines that do not even have OpenSSH installed.
+
+## Termix Backend
+
+`nermius backend termix add` stores a Termix URL plus API token as a local backend document. The token is moved into the encrypted secret store and the saved backend can be bound to a local profile with `--profile`; pass `--create-profile` to create that profile during registration.
+
+```powershell
+# Validate /health and /users/me before saving.
+nermius backend termix add lab --url https://termix.example.com --token tmx_xxx --profile termix-lab --create-profile
+
+# Save first when networking, reverse proxy, or certificate setup is not ready yet.
+nermius backend termix add lab --url http://localhost:8080 --token tmx_xxx --no-validate
+
+nermius backend termix show lab
+nermius backend termix list
+```
+
+This is the first Termix integration slice: it models the remote backend and the local mapping boundary. Actual pull, seed, and two-way sync commands are intentionally separate future steps. Imported/synced objects will use `external.backend_ref` plus the remote Termix object kind and ID, while `backend.target_profile_ref` keeps Termix-owned hosts grouped under the selected local profile without putting URL or credentials directly in the profile.
 
 ## Termius Export And Import
 

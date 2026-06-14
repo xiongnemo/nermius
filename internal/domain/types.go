@@ -12,6 +12,7 @@ const (
 	KindKey       DocumentKind = "key"
 	KindForward   DocumentKind = "forward"
 	KindKnownHost DocumentKind = "known_host"
+	KindBackend   DocumentKind = "backend"
 )
 
 type KnownHostsPolicy string
@@ -61,13 +62,20 @@ const (
 	KeyKindAgent      KeyKind = "agent"
 )
 
+type BackendType string
+
+const (
+	BackendTypeTermix BackendType = "termix"
+)
+
 type SecretKind string
 
 const (
-	SecretKindPassword   SecretKind = "password"
-	SecretKindPrivateKey SecretKind = "private_key"
-	SecretKindPassphrase SecretKind = "passphrase"
-	SecretKindProxyAuth  SecretKind = "proxy_password"
+	SecretKindPassword     SecretKind = "password"
+	SecretKindPrivateKey   SecretKind = "private_key"
+	SecretKindPassphrase   SecretKind = "passphrase"
+	SecretKindProxyAuth    SecretKind = "proxy_password"
+	SecretKindBackendToken SecretKind = "backend_token"
 )
 
 type Host struct {
@@ -85,16 +93,18 @@ type Host struct {
 	Route            *Route            `json:"route,omitempty"`
 	KnownHosts       *KnownHostsConfig `json:"known_hosts,omitempty"`
 	ForwardIDs       []string          `json:"forward_ids,omitempty"`
+	External         *ExternalRef      `json:"external,omitempty"`
 	CreatedAt        time.Time         `json:"created_at,omitempty"`
 	UpdatedAt        time.Time         `json:"updated_at,omitempty"`
 }
 
 type Group struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	CreatedAt   time.Time `json:"created_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description,omitempty"`
+	External    *ExternalRef `json:"external,omitempty"`
+	CreatedAt   time.Time    `json:"created_at,omitempty"`
+	UpdatedAt   time.Time    `json:"updated_at,omitempty"`
 }
 
 type Profile struct {
@@ -116,6 +126,7 @@ type Identity struct {
 	Name      string       `json:"name"`
 	Username  string       `json:"username"`
 	Methods   []AuthMethod `json:"methods"`
+	External  *ExternalRef `json:"external,omitempty"`
 	CreatedAt time.Time    `json:"created_at,omitempty"`
 	UpdatedAt time.Time    `json:"updated_at,omitempty"`
 }
@@ -130,33 +141,65 @@ type AuthMethod struct {
 }
 
 type Key struct {
-	ID                 string    `json:"id"`
-	Name               string    `json:"name"`
-	Kind               KeyKind   `json:"kind"`
-	SourcePath         string    `json:"source_path,omitempty"`
-	PrivateKeyPEM      string    `json:"private_key_pem,omitempty"`
-	PrivateKeySecretID string    `json:"private_key_secret_id,omitempty"`
-	Passphrase         string    `json:"passphrase,omitempty"`
-	PassphraseSecretID string    `json:"passphrase_secret_id,omitempty"`
-	AgentSocket        string    `json:"agent_socket,omitempty"`
-	CreatedAt          time.Time `json:"created_at,omitempty"`
-	UpdatedAt          time.Time `json:"updated_at,omitempty"`
+	ID                 string       `json:"id"`
+	Name               string       `json:"name"`
+	Kind               KeyKind      `json:"kind"`
+	SourcePath         string       `json:"source_path,omitempty"`
+	PrivateKeyPEM      string       `json:"private_key_pem,omitempty"`
+	PrivateKeySecretID string       `json:"private_key_secret_id,omitempty"`
+	Passphrase         string       `json:"passphrase,omitempty"`
+	PassphraseSecretID string       `json:"passphrase_secret_id,omitempty"`
+	AgentSocket        string       `json:"agent_socket,omitempty"`
+	External           *ExternalRef `json:"external,omitempty"`
+	CreatedAt          time.Time    `json:"created_at,omitempty"`
+	UpdatedAt          time.Time    `json:"updated_at,omitempty"`
 }
 
 type Forward struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name"`
-	Description string      `json:"description,omitempty"`
-	HostRef     string      `json:"host_ref,omitempty"`
-	Type        ForwardType `json:"type"`
-	ListenHost  string      `json:"listen_host,omitempty"`
-	ListenPort  int         `json:"listen_port"`
-	TargetHost  string      `json:"target_host,omitempty"`
-	TargetPort  int         `json:"target_port,omitempty"`
-	AutoStart   bool        `json:"auto_start,omitempty"`
-	Enabled     bool        `json:"enabled"`
-	CreatedAt   time.Time   `json:"created_at,omitempty"`
-	UpdatedAt   time.Time   `json:"updated_at,omitempty"`
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description,omitempty"`
+	HostRef     string       `json:"host_ref,omitempty"`
+	Type        ForwardType  `json:"type"`
+	ListenHost  string       `json:"listen_host,omitempty"`
+	ListenPort  int          `json:"listen_port"`
+	TargetHost  string       `json:"target_host,omitempty"`
+	TargetPort  int          `json:"target_port,omitempty"`
+	AutoStart   bool         `json:"auto_start,omitempty"`
+	Enabled     bool         `json:"enabled"`
+	External    *ExternalRef `json:"external,omitempty"`
+	CreatedAt   time.Time    `json:"created_at,omitempty"`
+	UpdatedAt   time.Time    `json:"updated_at,omitempty"`
+}
+
+type Backend struct {
+	ID                 string      `json:"id"`
+	Name               string      `json:"name"`
+	Type               BackendType `json:"type"`
+	URL                string      `json:"url"`
+	Token              string      `json:"token,omitempty"`
+	TokenSecretID      string      `json:"token_secret_id,omitempty"`
+	RemoteUserID       string      `json:"remote_user_id,omitempty"`
+	RemoteUser         string      `json:"remote_user,omitempty"`
+	InsecureSkipVerify bool        `json:"insecure_skip_verify,omitempty"`
+	CAFile             string      `json:"ca_file,omitempty"`
+	TargetProfileRef   string      `json:"target_profile_ref,omitempty"`
+	LastConnectedAt    *time.Time  `json:"last_connected_at,omitempty"`
+	LastSyncAt         *time.Time  `json:"last_sync_at,omitempty"`
+	LastSyncError      string      `json:"last_sync_error,omitempty"`
+	CreatedAt          time.Time   `json:"created_at,omitempty"`
+	UpdatedAt          time.Time   `json:"updated_at,omitempty"`
+}
+
+type ExternalRef struct {
+	BackendRef string    `json:"backend_ref"`
+	Kind       string    `json:"kind"`
+	ID         string    `json:"id"`
+	ParentID   string    `json:"parent_id,omitempty"`
+	Index      *int      `json:"index,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	Checksum   string    `json:"checksum,omitempty"`
+	ReadOnly   bool      `json:"read_only,omitempty"`
 }
 
 type KnownHostsConfig struct {
@@ -205,6 +248,8 @@ func (i Identity) Label() string { return i.Name }
 func (k Key) Label() string { return k.Name }
 
 func (f Forward) Label() string { return f.Name }
+
+func (b Backend) Label() string { return b.Name }
 
 func (k KnownHost) Label() string {
 	host := "<unknown>"

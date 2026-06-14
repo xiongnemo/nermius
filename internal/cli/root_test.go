@@ -248,6 +248,92 @@ func TestCompletionSuggestsTermiusExportSubcommand(t *testing.T) {
 	}
 }
 
+func TestBackendTermixHelpIncludesAddListShow(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"backend", "termix", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(backend termix --help) returned error: %v", err)
+	}
+	help := out.String()
+	for _, want := range []string{"add", "list", "show"} {
+		if !bytes.Contains([]byte(help), []byte(want)) {
+			t.Fatalf("expected backend termix help to include %q, got:\n%s", want, help)
+		}
+	}
+}
+
+func TestCompletionSuggestsBackendTermixSubcommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "backend", "te"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete backend te) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("termix")) {
+		t.Fatalf("expected completion to suggest termix, got:\n%s", out.String())
+	}
+}
+
+func TestBackendTermixAddCanCreateProfileWithoutValidation(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "vault.db")
+	manager := service.NewVaultManager(config.Paths{
+		ConfigDir:      dir,
+		CacheDir:       dir,
+		VaultPath:      vaultPath,
+		SessionPath:    filepath.Join(dir, "session.json"),
+		KnownHostsPath: filepath.Join(dir, "known_hosts"),
+	})
+	if err := manager.Init(context.Background(), "test-password"); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{vaultPath: vaultPath})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{
+		"--vault", vaultPath,
+		"backend", "termix", "add", "lab",
+		"--url", "http://localhost:8080/",
+		"--token", "tmx_secret",
+		"--profile", "termix-lab",
+		"--create-profile",
+		"--no-validate",
+	})
+	t.Setenv("NERMIUS_MASTER_PASSWORD", "test-password")
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(backend termix add) returned error: %v\n%s", err, out.String())
+	}
+
+	masterKey, db, err := manager.ResolveMasterKey(context.Background(), func(string) (string, error) {
+		return "test-password", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveMasterKey failed: %v", err)
+	}
+	defer db.Close()
+	catalog := service.NewCatalog(db, masterKey)
+	backends, err := catalog.ListBackends(context.Background())
+	if err != nil {
+		t.Fatalf("ListBackends failed: %v", err)
+	}
+	if len(backends) != 1 {
+		t.Fatalf("expected one backend, got %#v", backends)
+	}
+	if backends[0].URL != "http://localhost:8080" || backends[0].TokenSecretID == "" || backends[0].TargetProfileRef == "" {
+		t.Fatalf("unexpected backend: %#v", backends[0])
+	}
+	if _, err := catalog.GetProfile(context.Background(), backends[0].TargetProfileRef); err != nil {
+		t.Fatalf("expected created profile to exist: %v", err)
+	}
+}
+
 func newCLITestCatalog(t *testing.T) (*service.Catalog, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vault.db")
