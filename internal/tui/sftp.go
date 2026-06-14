@@ -44,6 +44,7 @@ type sftpPaneState struct {
 	path      string
 	entries   []service.SFTPEntry
 	cursor    int
+	scroll    int
 }
 
 type sftpTransferState struct {
@@ -266,9 +267,11 @@ func (a *App) refreshSFTPPane(ctx context.Context, pane sftpPaneIndex) error {
 	default:
 		state.entries = nil
 		state.cursor = 0
+		state.scroll = 0
 		return nil
 	}
 	state.cursor = clampInt(state.cursor, 0, max(0, len(state.entries)-1))
+	state.scroll = clampInt(state.scroll, 0, max(0, len(state.entries)-1))
 	return nil
 }
 
@@ -405,10 +408,12 @@ func (a *App) handleSFTPMouse(ctx context.Context, ev *tcell.EventMouse, prevBut
 	}
 	if x < w/2 {
 		a.sftp.activePane = sftpPaneLeft
-		a.sftp.panes[sftpPaneLeft].cursor = clampInt(y-2, 0, max(0, len(a.sftp.panes[sftpPaneLeft].entries)-1))
+		pane := &a.sftp.panes[sftpPaneLeft]
+		pane.cursor = clampInt(pane.scroll+y-2, 0, max(0, len(pane.entries)-1))
 	} else {
 		a.sftp.activePane = sftpPaneRight
-		a.sftp.panes[sftpPaneRight].cursor = clampInt(y-2, 0, max(0, len(a.sftp.panes[sftpPaneRight].entries)-1))
+		pane := &a.sftp.panes[sftpPaneRight]
+		pane.cursor = clampInt(pane.scroll+y-2, 0, max(0, len(pane.entries)-1))
 	}
 }
 
@@ -444,6 +449,7 @@ func (a *App) enterSFTPEntry(ctx context.Context) error {
 		pane.path = entry.Path
 	}
 	pane.cursor = 0
+	pane.scroll = 0
 	return a.refreshSFTPPane(ctx, a.sftp.activePane)
 }
 
@@ -467,6 +473,7 @@ func (a *App) sftpParent(ctx context.Context) error {
 		pane.path = next
 	}
 	pane.cursor = 0
+	pane.scroll = 0
 	return a.refreshSFTPPane(ctx, a.sftp.activePane)
 }
 
@@ -499,6 +506,7 @@ func (a *App) openSFTPPathPrompt(ctx context.Context) {
 			}
 			pane.path = input
 			pane.cursor = 0
+			pane.scroll = 0
 			if err := app.refreshSFTPPane(ctx, app.sftp.activePane); err != nil {
 				app.status = err.Error()
 			}
@@ -818,15 +826,42 @@ func (a *App) renderSFTPPane(x, width, height int, paneIndex sftpPaneIndex) {
 		return
 	}
 	rows := max(0, height-3)
-	for i := 0; i < rows && i < len(pane.entries); i++ {
+	ensureSFTPCursorVisible(pane, rows)
+	for row := 0; row < rows && pane.scroll+row < len(pane.entries); row++ {
+		i := pane.scroll + row
 		entry := pane.entries[i]
 		style := tcell.StyleDefault
 		if active && i == pane.cursor {
 			style = style.Background(tcell.ColorDarkSlateGray)
-			fillPartialRow(a.screen, x, 2+i, width, style)
+			fillPartialRow(a.screen, x, 2+row, width, style)
 		}
-		drawText(a.screen, x, 2+i, style, truncate(formatSFTPEntry(entry, width), width))
+		drawText(a.screen, x, 2+row, style, truncate(formatSFTPEntry(entry, width), width))
 	}
+}
+
+func ensureSFTPCursorVisible(pane *sftpPaneState, rows int) {
+	if pane == nil {
+		return
+	}
+	if len(pane.entries) == 0 || rows <= 0 {
+		if rows <= 0 && len(pane.entries) > 0 {
+			pane.cursor = clampInt(pane.cursor, 0, len(pane.entries)-1)
+			pane.scroll = clampInt(pane.scroll, 0, max(0, len(pane.entries)-1))
+			return
+		}
+		pane.cursor = 0
+		pane.scroll = 0
+		return
+	}
+	pane.cursor = clampInt(pane.cursor, 0, len(pane.entries)-1)
+	maxScroll := max(0, len(pane.entries)-rows)
+	pane.scroll = clampInt(pane.scroll, 0, maxScroll)
+	if pane.cursor < pane.scroll {
+		pane.scroll = pane.cursor
+	} else if pane.cursor >= pane.scroll+rows {
+		pane.scroll = pane.cursor - rows + 1
+	}
+	pane.scroll = clampInt(pane.scroll, 0, maxScroll)
 }
 
 func formatSFTPEntry(entry service.SFTPEntry, width int) string {

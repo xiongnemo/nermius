@@ -56,6 +56,101 @@ func TestSFTPTogglePaneAndCursorClamp(t *testing.T) {
 	}
 }
 
+func TestSFTPPaneScrollFollowsCursor(t *testing.T) {
+	pane := &sftpPaneState{
+		kind:    sftpPaneRemote,
+		entries: makeSFTPTestEntries("00", "01", "02", "03", "04", "05", "06", "07", "08", "09"),
+		cursor:  8,
+	}
+	ensureSFTPCursorVisible(pane, 4)
+	if pane.scroll != 5 {
+		t.Fatalf("scroll = %d, want 5", pane.scroll)
+	}
+	pane.cursor = 2
+	ensureSFTPCursorVisible(pane, 4)
+	if pane.scroll != 2 {
+		t.Fatalf("scroll after moving above viewport = %d, want 2", pane.scroll)
+	}
+	pane.cursor = 99
+	pane.scroll = 99
+	pane.entries = makeSFTPTestEntries("only")
+	ensureSFTPCursorVisible(pane, 4)
+	if pane.cursor != 0 || pane.scroll != 0 {
+		t.Fatalf("short list cursor/scroll = %d/%d, want 0/0", pane.cursor, pane.scroll)
+	}
+	pane = &sftpPaneState{
+		kind:    sftpPaneRemote,
+		entries: makeSFTPTestEntries("00", "01", "02", "03"),
+		cursor:  2,
+		scroll:  1,
+	}
+	ensureSFTPCursorVisible(pane, 0)
+	if pane.cursor != 2 || pane.scroll != 1 {
+		t.Fatalf("zero rows cursor/scroll = %d/%d, want 2/1", pane.cursor, pane.scroll)
+	}
+}
+
+func TestRenderSFTPPaneUsesScrollOffset(t *testing.T) {
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	defer screen.Fini()
+	screen.SetSize(80, 8)
+	app := &App{
+		screen: screen,
+		sftp: &sftpBrowserState{
+			activePane: sftpPaneRight,
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneRight: {
+					kind:    sftpPaneRemote,
+					entries: makeSFTPTestEntries("00", "01", "02", "03", "04", "05", "06", "07"),
+					cursor:  6,
+				},
+			},
+		},
+	}
+	app.renderSFTPPane(0, 40, 8, sftpPaneRight)
+	if app.sftp.panes[sftpPaneRight].scroll != 2 {
+		t.Fatalf("render scroll = %d, want 2", app.sftp.panes[sftpPaneRight].scroll)
+	}
+	if got := simulationScreenText(screen, 0, 2, 40); !strings.Contains(got, "02") {
+		t.Fatalf("first visible row = %q, want entry 02", got)
+	}
+	if got := simulationScreenText(screen, 0, 6, 40); !strings.Contains(got, "06") {
+		t.Fatalf("selected visible row = %q, want entry 06", got)
+	}
+}
+
+func TestSFTPMouseClickUsesScrollOffset(t *testing.T) {
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	defer screen.Fini()
+	screen.SetSize(80, 8)
+	app := &App{
+		screen: screen,
+		sftp: &sftpBrowserState{
+			activePane: sftpPaneLeft,
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneRight: {
+					kind:    sftpPaneRemote,
+					entries: makeSFTPTestEntries("00", "01", "02", "03", "04", "05", "06", "07"),
+					scroll:  3,
+				},
+			},
+		},
+	}
+	app.handleSFTPMouse(context.Background(), tcell.NewEventMouse(50, 4, tcell.Button1, tcell.ModNone), tcell.ButtonNone)
+	if app.sftp.activePane != sftpPaneRight {
+		t.Fatalf("active pane = %v, want right", app.sftp.activePane)
+	}
+	if app.sftp.panes[sftpPaneRight].cursor != 5 {
+		t.Fatalf("cursor = %d, want 5", app.sftp.panes[sftpPaneRight].cursor)
+	}
+}
+
 func TestSFTPLeftRightKeysNavigateTabs(t *testing.T) {
 	app := &App{
 		tabs: []domain.DocumentKind{domain.KindHost, domain.KindIdentity},
@@ -184,4 +279,13 @@ func makeSFTPTestEntries(names ...string) []service.SFTPEntry {
 		entries = append(entries, service.SFTPEntry{Name: name, Path: name})
 	}
 	return entries
+}
+
+func simulationScreenText(screen tcell.SimulationScreen, x, y, width int) string {
+	var builder strings.Builder
+	for col := 0; col < width; col++ {
+		mainc, _, _, _ := screen.GetContent(x+col, y)
+		builder.WriteRune(mainc)
+	}
+	return builder.String()
 }
