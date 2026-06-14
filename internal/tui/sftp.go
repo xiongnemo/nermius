@@ -14,29 +14,36 @@ import (
 	"github.com/nermius/nermius/internal/service"
 )
 
-type sftpPane int
+type sftpPaneIndex int
 
 const (
-	sftpPaneLocal sftpPane = iota
-	sftpPaneRemote
+	sftpPaneLeft sftpPaneIndex = iota
+	sftpPaneRight
+	sftpPaneCount
+)
+
+type sftpPaneKind string
+
+const (
+	sftpPaneEmpty  sftpPaneKind = "empty"
+	sftpPaneLocal  sftpPaneKind = "local"
+	sftpPaneRemote sftpPaneKind = "remote"
 )
 
 type sftpBrowserState struct {
+	panes      [sftpPaneCount]sftpPaneState
+	activePane sftpPaneIndex
+	transfer   *sftpTransferState
+}
+
+type sftpPaneState struct {
+	kind      sftpPaneKind
 	hostID    string
 	hostLabel string
 	session   *service.SFTPSession
-
-	localPath  string
-	remotePath string
-
-	localEntries  []service.SFTPEntry
-	remoteEntries []service.SFTPEntry
-
-	localCursor  int
-	remoteCursor int
-	activePane   sftpPane
-
-	transfer *sftpTransferState
+	path      string
+	entries   []service.SFTPEntry
+	cursor    int
 }
 
 type sftpTransferState struct {
@@ -49,24 +56,51 @@ type sftpTransferResult struct {
 	err     error
 }
 
-func newSFTPBrowserState(hostID, hostLabel string, session *service.SFTPSession) *sftpBrowserState {
-	localPath, err := os.Getwd()
-	if err != nil {
-		localPath = "."
+func newSFTPBrowserState() *sftpBrowserState {
+	return &sftpBrowserState{activePane: sftpPaneRight}
+}
+
+func (p *sftpPaneState) configured() bool {
+	return p != nil && p.kind != "" && p.kind != sftpPaneEmpty
+}
+
+func (p *sftpPaneState) label(side sftpPaneIndex) string {
+	sideLabel := "LEFT"
+	if side == sftpPaneRight {
+		sideLabel = "RIGHT"
 	}
-	return &sftpBrowserState{
-		hostID:     hostID,
-		hostLabel:  hostLabel,
-		session:    session,
-		localPath:  localPath,
-		remotePath: ".",
-		activePane: sftpPaneRemote,
+	switch p.kind {
+	case sftpPaneLocal:
+		return sideLabel + " LOCAL " + p.path
+	case sftpPaneRemote:
+		return sideLabel + " REMOTE " + p.hostLabel + ":" + p.path
+	default:
+		return sideLabel + " EMPTY"
+	}
+}
+
+func (a *App) ensureSFTPBrowser() {
+	if a.sftp == nil {
+		a.sftp = newSFTPBrowserState()
 	}
 }
 
 func (a *App) openSelectedHostSFTP(ctx context.Context) error {
 	record := a.selectedRecord()
 	if record.ID == "" {
+		return nil
+	}
+	if a.sftp != nil && (a.sftp.panes[sftpPaneLeft].configured() || a.sftp.panes[sftpPaneRight].configured()) {
+		a.pushModal(modalState{
+			kind: modalKindConfirm,
+			confirm: &confirmModal{
+				title: "Replace SFTP Panes",
+				lines: wrapModalLines("Replace current SFTP panes with Local on the left and "+record.Label+" on the right?", 68),
+				onConfirm: func(ctx context.Context, app *App) error {
+					return app.openHostSFTP(ctx, record.ID, record.Label)
+				},
+			},
+		})
 		return nil
 	}
 	return a.openHostSFTP(ctx, record.ID, record.Label)
@@ -76,6 +110,68 @@ func (a *App) openHostSFTP(ctx context.Context, id, label string) error {
 	if id == "" {
 		return nil
 	}
+	a.closeSFTPPanes()
+	a.sftp = newSFTPBrowserState()
+	if err := a.setSFTPPaneLocal(ctx, sftpPaneLeft); err != nil {
+		a.closeSFTP()
+		return err
+	}
+	if err := a.setSFTPPaneRemote(ctx, sftpPaneRight, id, label); err != nil {
+		a.closeSFTP()
+		return err
+	}
+	a.sftp.activePane = sftpPaneRight
+	a.status = fmt.Sprintf("Opened SFTP for %s.", a.sftp.panes[sftpPaneRight].hostLabel)
+	a.setActiveTab(a.sftpTabIndex())
+	return nil
+}
+
+func (a *App) assignSelectedHostToSFTPPane(ctx context.Context, pane sftpPaneIndex) error {
+	record := a.selectedRecord()
+	if record.ID == "" {
+		return nil
+	}
+	a.ensureSFTPBrowser()
+	if a.sftp.panes[pane].configured() {
+		a.pushModal(modalState{
+			kind: modalKindConfirm,
+			confirm: &confirmModal{
+				title: "Replace SFTP Pane",
+				lines: wrapModalLines(fmt.Sprintf("Replace %s SFTP pane with %s?", sftpPaneName(pane), record.Label), 68),
+				onConfirm: func(ctx context.Context, app *App) error {
+					return app.assignHostToSFTPPane(ctx, pane, record.ID, record.Label)
+				},
+			},
+		})
+		return nil
+	}
+	return a.assignHostToSFTPPane(ctx, pane, record.ID, record.Label)
+}
+
+func (a *App) assignHostToSFTPPane(ctx context.Context, pane sftpPaneIndex, id, label string) error {
+	a.ensureSFTPBrowser()
+	if err := a.setSFTPPaneRemote(ctx, pane, id, label); err != nil {
+		return err
+	}
+	a.sftp.activePane = pane
+	a.status = fmt.Sprintf("Set %s SFTP pane to %s.", sftpPaneName(pane), a.sftp.panes[pane].hostLabel)
+	a.setActiveTab(a.sftpTabIndex())
+	return nil
+}
+
+func (a *App) setSFTPPaneLocal(ctx context.Context, pane sftpPaneIndex) error {
+	a.ensureSFTPBrowser()
+	localPath, err := os.Getwd()
+	if err != nil {
+		localPath = "."
+	}
+	a.closeSFTPPane(pane)
+	a.sftp.panes[pane] = sftpPaneState{kind: sftpPaneLocal, path: localPath}
+	return a.refreshSFTPPane(ctx, pane)
+}
+
+func (a *App) setSFTPPaneRemote(ctx context.Context, pane sftpPaneIndex, id, label string) error {
+	a.ensureSFTPBrowser()
 	if strings.TrimSpace(label) == "" {
 		if host, err := a.catalog.GetHost(ctx, id); err == nil && host != nil {
 			label = host.Label()
@@ -88,17 +184,18 @@ func (a *App) openHostSFTP(ctx context.Context, id, label string) error {
 	if err != nil {
 		return err
 	}
-	if a.sftp != nil && a.sftp.session != nil {
-		_ = a.sftp.session.Close()
+	a.closeSFTPPane(pane)
+	a.sftp.panes[pane] = sftpPaneState{
+		kind:      sftpPaneRemote,
+		hostID:    id,
+		hostLabel: label,
+		session:   session,
+		path:      ".",
 	}
-	a.sftp = newSFTPBrowserState(id, label, session)
-	if err := a.refreshSFTP(ctx); err != nil {
-		_ = session.Close()
-		a.sftp = nil
+	if err := a.refreshSFTPPane(ctx, pane); err != nil {
+		a.closeSFTPPane(pane)
 		return err
 	}
-	a.status = fmt.Sprintf("Opened SFTP for %s.", label)
-	a.setActiveTab(a.sftpTabIndex())
 	return nil
 }
 
@@ -106,9 +203,7 @@ func (a *App) closeSFTP() {
 	if a.sftp == nil {
 		return
 	}
-	if a.sftp.session != nil {
-		_ = a.sftp.session.Close()
-	}
+	a.closeSFTPPanes()
 	a.sftp.transfer = nil
 	a.sftp = nil
 	if a.inSFTPTab() {
@@ -116,33 +211,64 @@ func (a *App) closeSFTP() {
 	}
 }
 
-func (a *App) refreshSFTP(ctx context.Context) error {
-	if a.sftp == nil || a.sftp.session == nil {
-		return nil
+func (a *App) closeSFTPPanes() {
+	if a.sftp == nil {
+		return
 	}
-	if err := a.refreshSFTPLocal(); err != nil {
-		return err
+	for pane := sftpPaneLeft; pane < sftpPaneCount; pane++ {
+		a.closeSFTPPane(pane)
 	}
-	entries, err := a.sftp.session.ReadDir(ctx, a.sftp.remotePath)
-	if err != nil {
-		return err
-	}
-	a.sftp.remoteEntries = entries
-	a.sftp.localCursor = clampInt(a.sftp.localCursor, 0, max(0, len(a.sftp.localEntries)-1))
-	a.sftp.remoteCursor = clampInt(a.sftp.remoteCursor, 0, max(0, len(a.sftp.remoteEntries)-1))
-	return nil
 }
 
-func (a *App) refreshSFTPLocal() error {
+func (a *App) closeSFTPPane(pane sftpPaneIndex) {
+	if a.sftp == nil || pane < 0 || pane >= sftpPaneCount {
+		return
+	}
+	if a.sftp.panes[pane].session != nil {
+		_ = a.sftp.panes[pane].session.Close()
+	}
+	a.sftp.panes[pane] = sftpPaneState{}
+}
+
+func (a *App) refreshSFTP(ctx context.Context) error {
 	if a.sftp == nil {
 		return nil
 	}
-	entries, err := readLocalSFTPEntries(a.sftp.localPath)
-	if err != nil {
-		return err
+	for pane := sftpPaneLeft; pane < sftpPaneCount; pane++ {
+		if err := a.refreshSFTPPane(ctx, pane); err != nil {
+			return err
+		}
 	}
-	a.sftp.localEntries = entries
-	a.sftp.localCursor = clampInt(a.sftp.localCursor, 0, max(0, len(entries)-1))
+	return nil
+}
+
+func (a *App) refreshSFTPPane(ctx context.Context, pane sftpPaneIndex) error {
+	if a.sftp == nil || pane < 0 || pane >= sftpPaneCount {
+		return nil
+	}
+	state := &a.sftp.panes[pane]
+	switch state.kind {
+	case sftpPaneLocal:
+		entries, err := readLocalSFTPEntries(state.path)
+		if err != nil {
+			return err
+		}
+		state.entries = entries
+	case sftpPaneRemote:
+		if state.session == nil {
+			return nil
+		}
+		entries, err := state.session.ReadDir(ctx, state.path)
+		if err != nil {
+			return err
+		}
+		state.entries = entries
+	default:
+		state.entries = nil
+		state.cursor = 0
+		return nil
+	}
+	state.cursor = clampInt(state.cursor, 0, max(0, len(state.entries)-1))
 	return nil
 }
 
@@ -235,6 +361,8 @@ func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, erro
 			}
 		case 'g':
 			a.openSFTPPathPrompt(ctx)
+		case 'l':
+			a.setActiveSFTPPaneLocal(ctx)
 		case 'u':
 			a.startSFTPUpload(ctx)
 		case 'd':
@@ -254,6 +382,7 @@ func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, erro
 }
 
 func (a *App) handleSFTPMouse(ctx context.Context, ev *tcell.EventMouse, prevButtons tcell.ButtonMask) {
+	_ = ctx
 	if a.sftp == nil {
 		return
 	}
@@ -275,75 +404,83 @@ func (a *App) handleSFTPMouse(ctx context.Context, ev *tcell.EventMouse, prevBut
 		return
 	}
 	if x < w/2 {
-		a.sftp.activePane = sftpPaneLocal
-		a.sftp.localCursor = clampInt(y-2, 0, max(0, len(a.sftp.localEntries)-1))
+		a.sftp.activePane = sftpPaneLeft
+		a.sftp.panes[sftpPaneLeft].cursor = clampInt(y-2, 0, max(0, len(a.sftp.panes[sftpPaneLeft].entries)-1))
 	} else {
-		a.sftp.activePane = sftpPaneRemote
-		a.sftp.remoteCursor = clampInt(y-2, 0, max(0, len(a.sftp.remoteEntries)-1))
+		a.sftp.activePane = sftpPaneRight
+		a.sftp.panes[sftpPaneRight].cursor = clampInt(y-2, 0, max(0, len(a.sftp.panes[sftpPaneRight].entries)-1))
 	}
 }
 
 func (a *App) toggleSFTPPane() {
-	if a.sftp.activePane == sftpPaneLocal {
-		a.sftp.activePane = sftpPaneRemote
+	if a.sftp.activePane == sftpPaneLeft {
+		a.sftp.activePane = sftpPaneRight
 		return
 	}
-	a.sftp.activePane = sftpPaneLocal
+	a.sftp.activePane = sftpPaneLeft
 }
 
 func (a *App) moveSFTPCursor(delta int) {
 	if a.sftp == nil || delta == 0 {
 		return
 	}
-	if a.sftp.activePane == sftpPaneLocal {
-		a.sftp.localCursor = clampInt(a.sftp.localCursor+delta, 0, max(0, len(a.sftp.localEntries)-1))
-		return
-	}
-	a.sftp.remoteCursor = clampInt(a.sftp.remoteCursor+delta, 0, max(0, len(a.sftp.remoteEntries)-1))
+	pane := &a.sftp.panes[a.sftp.activePane]
+	pane.cursor = clampInt(pane.cursor+delta, 0, max(0, len(pane.entries)-1))
 }
 
 func (a *App) enterSFTPEntry(ctx context.Context) error {
+	pane := a.activeSFTPPane()
+	if pane == nil || !pane.configured() {
+		return nil
+	}
 	entry, ok := a.currentSFTPEntry()
 	if !ok || !entry.IsDir {
 		return nil
 	}
-	if a.sftp.activePane == sftpPaneLocal {
-		a.sftp.localPath = entry.Path
-		a.sftp.localCursor = 0
-		return a.refreshSFTPLocal()
+	switch pane.kind {
+	case sftpPaneLocal:
+		pane.path = entry.Path
+	case sftpPaneRemote:
+		pane.path = entry.Path
 	}
-	a.sftp.remotePath = entry.Path
-	a.sftp.remoteCursor = 0
-	return a.refreshSFTP(ctx)
+	pane.cursor = 0
+	return a.refreshSFTPPane(ctx, a.sftp.activePane)
 }
 
 func (a *App) sftpParent(ctx context.Context) error {
-	if a.sftp.activePane == sftpPaneLocal {
-		next := filepath.Dir(a.sftp.localPath)
-		if next == a.sftp.localPath {
-			return nil
-		}
-		a.sftp.localPath = next
-		a.sftp.localCursor = 0
-		return a.refreshSFTPLocal()
-	}
-	next := service.ParentSFTPRemotePath(a.sftp.remotePath)
-	if next == a.sftp.remotePath {
+	pane := a.activeSFTPPane()
+	if pane == nil || !pane.configured() {
 		return nil
 	}
-	a.sftp.remotePath = next
-	a.sftp.remoteCursor = 0
-	return a.refreshSFTP(ctx)
+	switch pane.kind {
+	case sftpPaneLocal:
+		next := filepath.Dir(pane.path)
+		if next == pane.path {
+			return nil
+		}
+		pane.path = next
+	case sftpPaneRemote:
+		next := service.ParentSFTPRemotePath(pane.path)
+		if next == pane.path {
+			return nil
+		}
+		pane.path = next
+	}
+	pane.cursor = 0
+	return a.refreshSFTPPane(ctx, a.sftp.activePane)
 }
 
 func (a *App) openSFTPPathPrompt(ctx context.Context) {
-	if a.sftp == nil {
+	pane := a.activeSFTPPane()
+	if pane == nil || !pane.configured() {
+		a.status = "Configure this SFTP pane first."
 		return
 	}
-	current := a.sftp.localPath
-	title := "Local path"
-	if a.sftp.activePane == sftpPaneRemote {
-		current = a.sftp.remotePath
+	current := pane.path
+	title := "Path"
+	if pane.kind == sftpPaneLocal {
+		title = "Local path"
+	} else if pane.kind == sftpPaneRemote {
 		title = "Remote path"
 	}
 	a.pushModal(modalState{
@@ -353,27 +490,64 @@ func (a *App) openSFTPPathPrompt(ctx context.Context) {
 			if input == "" {
 				return
 			}
-			if app.sftp.activePane == sftpPaneLocal {
-				app.sftp.localPath = input
-				if err := app.refreshSFTPLocal(); err != nil {
-					app.status = err.Error()
-				}
+			pane := app.activeSFTPPane()
+			if pane == nil {
 				return
 			}
-			app.sftp.remotePath = service.NormalizeSFTPRemotePath(input)
-			app.sftp.remoteCursor = 0
-			if err := app.refreshSFTP(ctx); err != nil {
+			if pane.kind == sftpPaneRemote {
+				input = service.NormalizeSFTPRemotePath(input)
+			}
+			pane.path = input
+			pane.cursor = 0
+			if err := app.refreshSFTPPane(ctx, app.sftp.activePane); err != nil {
 				app.status = err.Error()
 			}
 		}),
 	})
 }
 
+func (a *App) setActiveSFTPPaneLocal(ctx context.Context) {
+	if a.sftp == nil {
+		a.ensureSFTPBrowser()
+	}
+	pane := a.sftp.activePane
+	if a.sftp.panes[pane].configured() {
+		a.pushModal(modalState{
+			kind: modalKindConfirm,
+			confirm: &confirmModal{
+				title: "Replace SFTP Pane",
+				lines: wrapModalLines(fmt.Sprintf("Replace %s SFTP pane with Local?", sftpPaneName(pane)), 68),
+				onConfirm: func(ctx context.Context, app *App) error {
+					return app.assignLocalToSFTPPane(ctx, pane)
+				},
+			},
+		})
+		return
+	}
+	if err := a.assignLocalToSFTPPane(ctx, pane); err != nil {
+		a.status = err.Error()
+	}
+}
+
+func (a *App) assignLocalToSFTPPane(ctx context.Context, pane sftpPaneIndex) error {
+	if err := a.setSFTPPaneLocal(ctx, pane); err != nil {
+		return err
+	}
+	a.sftp.activePane = pane
+	a.status = fmt.Sprintf("Set %s SFTP pane to Local.", sftpPaneName(pane))
+	return nil
+}
+
 func (a *App) startSFTPUpload(ctx context.Context) {
 	if a.sftp == nil || a.sftp.transfer != nil {
 		return
 	}
-	entry, ok := a.localSFTPEntry()
+	localPane, remotePane, ok := a.localRemoteSFTPPanes()
+	if !ok {
+		a.status = "Copy between these pane types is not supported yet."
+		return
+	}
+	entry, ok := selectedSFTPEntry(localPane)
 	if !ok {
 		a.status = "No local file selected."
 		return
@@ -382,8 +556,8 @@ func (a *App) startSFTPUpload(ctx context.Context) {
 		a.status = "Directory upload is not supported yet."
 		return
 	}
-	session := a.sftp.session
-	destination := service.JoinSFTPRemotePath(a.sftp.remotePath, entry.Name)
+	session := remotePane.session
+	destination := service.JoinSFTPRemotePath(remotePane.path, entry.Name)
 	confirm := func() {
 		a.runSFTPTransfer(ctx, "Uploading "+entry.Name, func(ctx context.Context) (string, error) {
 			report, err := session.Upload(ctx, entry.Path, destination, true)
@@ -393,7 +567,7 @@ func (a *App) startSFTPUpload(ctx context.Context) {
 			return fmt.Sprintf("Uploaded %s (%d bytes).", report.Destination, report.Bytes), nil
 		})
 	}
-	if a.remoteSFTPEntryExists(destination) {
+	if sftpPaneEntryExists(remotePane, destination) {
 		a.pushModal(modalState{
 			kind: modalKindConfirm,
 			confirm: &confirmModal{
@@ -414,7 +588,12 @@ func (a *App) startSFTPDownload(ctx context.Context) {
 	if a.sftp == nil || a.sftp.transfer != nil {
 		return
 	}
-	entry, ok := a.remoteSFTPEntry()
+	localPane, remotePane, ok := a.localRemoteSFTPPanes()
+	if !ok {
+		a.status = "Copy between these pane types is not supported yet."
+		return
+	}
+	entry, ok := selectedSFTPEntry(remotePane)
 	if !ok {
 		a.status = "No remote file selected."
 		return
@@ -423,8 +602,8 @@ func (a *App) startSFTPDownload(ctx context.Context) {
 		a.status = "Directory download is not supported yet."
 		return
 	}
-	session := a.sftp.session
-	destination := filepath.Join(a.sftp.localPath, entry.Name)
+	session := remotePane.session
+	destination := filepath.Join(localPane.path, entry.Name)
 	confirm := func() {
 		a.runSFTPTransfer(ctx, "Downloading "+entry.Name, func(ctx context.Context) (string, error) {
 			report, err := session.Download(ctx, entry.Path, destination, true)
@@ -452,6 +631,21 @@ func (a *App) startSFTPDownload(ctx context.Context) {
 		return
 	}
 	confirm()
+}
+
+func (a *App) localRemoteSFTPPanes() (*sftpPaneState, *sftpPaneState, bool) {
+	if a.sftp == nil {
+		return nil, nil, false
+	}
+	left := &a.sftp.panes[sftpPaneLeft]
+	right := &a.sftp.panes[sftpPaneRight]
+	if left.kind == sftpPaneLocal && right.kind == sftpPaneRemote {
+		return left, right, true
+	}
+	if left.kind == sftpPaneRemote && right.kind == sftpPaneLocal {
+		return right, left, true
+	}
+	return nil, nil, false
 }
 
 func (a *App) runSFTPTransfer(ctx context.Context, message string, fn func(context.Context) (string, error)) {
@@ -490,10 +684,8 @@ func (a *App) collectSFTPUpdates(ctx context.Context) {
 }
 
 func (a *App) openSFTPMkdirPrompt(ctx context.Context) {
-	if a.sftp == nil {
-		return
-	}
-	if a.sftp.activePane != sftpPaneRemote {
+	pane := a.activeSFTPPane()
+	if pane == nil || pane.kind != sftpPaneRemote {
 		a.status = "Remote pane must be active to create a directory."
 		return
 	}
@@ -504,13 +696,17 @@ func (a *App) openSFTPMkdirPrompt(ctx context.Context) {
 			if input == "" {
 				return
 			}
-			remotePath := service.JoinSFTPRemotePath(app.sftp.remotePath, input)
-			if err := app.sftp.session.Mkdir(ctx, remotePath, false); err != nil {
+			pane := app.activeSFTPPane()
+			if pane == nil || pane.kind != sftpPaneRemote {
+				return
+			}
+			remotePath := service.JoinSFTPRemotePath(pane.path, input)
+			if err := pane.session.Mkdir(ctx, remotePath, false); err != nil {
 				app.status = err.Error()
 				return
 			}
 			app.status = "Created " + remotePath + "."
-			if err := app.refreshSFTP(ctx); err != nil {
+			if err := app.refreshSFTPPane(ctx, app.sftp.activePane); err != nil {
 				app.status = err.Error()
 			}
 		}),
@@ -518,14 +714,12 @@ func (a *App) openSFTPMkdirPrompt(ctx context.Context) {
 }
 
 func (a *App) openSFTPDeleteConfirm(ctx context.Context) {
-	if a.sftp == nil {
-		return
-	}
-	if a.sftp.activePane != sftpPaneRemote {
+	pane := a.activeSFTPPane()
+	if pane == nil || pane.kind != sftpPaneRemote {
 		a.status = "Remote pane must be active to delete."
 		return
 	}
-	entry, ok := a.remoteSFTPEntry()
+	entry, ok := selectedSFTPEntry(pane)
 	if !ok {
 		return
 	}
@@ -538,14 +732,18 @@ func (a *App) openSFTPDeleteConfirm(ctx context.Context) {
 		confirm: &confirmModal{
 			title: "Remove Remote Path",
 			lines: wrapModalLines(action+entry.Path+"?", 68),
-			onConfirm: func(context.Context, *App) error {
-				if err := a.sftp.session.Remove(ctx, entry.Path, entry.IsDir); err != nil {
-					a.status = err.Error()
+			onConfirm: func(_ context.Context, app *App) error {
+				pane := app.activeSFTPPane()
+				if pane == nil || pane.kind != sftpPaneRemote {
 					return nil
 				}
-				a.status = "Removed " + entry.Path + "."
-				if err := a.refreshSFTP(ctx); err != nil {
-					a.status = err.Error()
+				if err := pane.session.Remove(ctx, entry.Path, entry.IsDir); err != nil {
+					app.status = err.Error()
+					return nil
+				}
+				app.status = "Removed " + entry.Path + "."
+				if err := app.refreshSFTPPane(ctx, app.sftp.activePane); err != nil {
+					app.status = err.Error()
 				}
 				return nil
 			},
@@ -554,14 +752,12 @@ func (a *App) openSFTPDeleteConfirm(ctx context.Context) {
 }
 
 func (a *App) openSFTPRenamePrompt(ctx context.Context) {
-	if a.sftp == nil {
-		return
-	}
-	if a.sftp.activePane != sftpPaneRemote {
+	pane := a.activeSFTPPane()
+	if pane == nil || pane.kind != sftpPaneRemote {
 		a.status = "Remote pane must be active to rename."
 		return
 	}
-	entry, ok := a.remoteSFTPEntry()
+	entry, ok := selectedSFTPEntry(pane)
 	if !ok {
 		return
 	}
@@ -572,13 +768,17 @@ func (a *App) openSFTPRenamePrompt(ctx context.Context) {
 			if input == "" {
 				return
 			}
+			pane := app.activeSFTPPane()
+			if pane == nil || pane.kind != sftpPaneRemote {
+				return
+			}
 			newPath := service.NormalizeSFTPRemotePath(input)
-			if err := app.sftp.session.Rename(ctx, entry.Path, newPath); err != nil {
+			if err := pane.session.Rename(ctx, entry.Path, newPath); err != nil {
 				app.status = err.Error()
 				return
 			}
 			app.status = "Renamed " + entry.Path + " to " + newPath + "."
-			if err := app.refreshSFTP(ctx); err != nil {
+			if err := app.refreshSFTPPane(ctx, app.sftp.activePane); err != nil {
 				app.status = err.Error()
 			}
 		}),
@@ -587,12 +787,12 @@ func (a *App) openSFTPRenamePrompt(ctx context.Context) {
 
 func (a *App) renderSFTP(w, h int) {
 	if a.sftp == nil {
-		drawText(a.screen, 0, 2, tcell.StyleDefault, "No SFTP connection. Go to HOST and press s.")
+		drawText(a.screen, 0, 2, tcell.StyleDefault, "No SFTP panes. Go to HOST and press s, [, or ].")
 		return
 	}
 	mid := max(1, w/2)
-	a.renderSFTPPane(0, mid, h, "LOCAL "+a.sftp.localPath, a.sftp.localEntries, a.sftp.localCursor, a.sftp.activePane == sftpPaneLocal)
-	a.renderSFTPPane(mid, w-mid, h, "REMOTE "+a.sftp.hostLabel+":"+a.sftp.remotePath, a.sftp.remoteEntries, a.sftp.remoteCursor, a.sftp.activePane == sftpPaneRemote)
+	a.renderSFTPPane(0, mid, h, sftpPaneLeft)
+	a.renderSFTPPane(mid, w-mid, h, sftpPaneRight)
 	if mid < w {
 		style := tcell.StyleDefault.Foreground(tcell.ColorDarkSlateGray)
 		for y := 1; y < h-1; y++ {
@@ -601,21 +801,27 @@ func (a *App) renderSFTP(w, h int) {
 	}
 }
 
-func (a *App) renderSFTPPane(x, width, height int, title string, entries []service.SFTPEntry, cursor int, active bool) {
-	if width <= 0 {
+func (a *App) renderSFTPPane(x, width, height int, paneIndex sftpPaneIndex) {
+	if width <= 0 || a.sftp == nil {
 		return
 	}
+	pane := &a.sftp.panes[paneIndex]
+	active := a.sftp.activePane == paneIndex
 	titleStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow)
 	if active {
 		titleStyle = titleStyle.Background(tcell.ColorDarkCyan).Foreground(tcell.ColorWhite)
 		fillPartialRow(a.screen, x, 1, width, titleStyle)
 	}
-	drawText(a.screen, x, 1, titleStyle, truncate(title, width))
+	drawText(a.screen, x, 1, titleStyle, truncate(pane.label(paneIndex), width))
+	if !pane.configured() {
+		drawText(a.screen, x, 2, tcell.StyleDefault.Foreground(tcell.ColorGray), truncate("Empty pane. Press l for Local or choose a Host with [ / ].", width))
+		return
+	}
 	rows := max(0, height-3)
-	for i := 0; i < rows && i < len(entries); i++ {
-		entry := entries[i]
+	for i := 0; i < rows && i < len(pane.entries); i++ {
+		entry := pane.entries[i]
 		style := tcell.StyleDefault
-		if active && i == cursor {
+		if active && i == pane.cursor {
 			style = style.Background(tcell.ColorDarkSlateGray)
 			fillPartialRow(a.screen, x, 2+i, width, style)
 		}
@@ -638,41 +844,42 @@ func fillPartialRow(screen tcell.Screen, x, y, width int, style tcell.Style) {
 	}
 }
 
+func (a *App) activeSFTPPane() *sftpPaneState {
+	if a.sftp == nil || a.sftp.activePane < 0 || a.sftp.activePane >= sftpPaneCount {
+		return nil
+	}
+	return &a.sftp.panes[a.sftp.activePane]
+}
+
 func (a *App) currentSFTPEntry() (service.SFTPEntry, bool) {
-	if a.sftp == nil {
-		return service.SFTPEntry{}, false
-	}
-	if a.sftp.activePane == sftpPaneLocal {
-		return a.localSFTPEntry()
-	}
-	return a.remoteSFTPEntry()
+	return selectedSFTPEntry(a.activeSFTPPane())
 }
 
-func (a *App) localSFTPEntry() (service.SFTPEntry, bool) {
-	if a.sftp == nil || a.sftp.localCursor < 0 || a.sftp.localCursor >= len(a.sftp.localEntries) {
+func selectedSFTPEntry(pane *sftpPaneState) (service.SFTPEntry, bool) {
+	if pane == nil || pane.cursor < 0 || pane.cursor >= len(pane.entries) {
 		return service.SFTPEntry{}, false
 	}
-	return a.sftp.localEntries[a.sftp.localCursor], true
+	return pane.entries[pane.cursor], true
 }
 
-func (a *App) remoteSFTPEntry() (service.SFTPEntry, bool) {
-	if a.sftp == nil || a.sftp.remoteCursor < 0 || a.sftp.remoteCursor >= len(a.sftp.remoteEntries) {
-		return service.SFTPEntry{}, false
-	}
-	return a.sftp.remoteEntries[a.sftp.remoteCursor], true
-}
-
-func (a *App) remoteSFTPEntryExists(remotePath string) bool {
-	if a.sftp == nil {
+func sftpPaneEntryExists(pane *sftpPaneState, remotePath string) bool {
+	if pane == nil {
 		return false
 	}
 	remotePath = service.NormalizeSFTPRemotePath(remotePath)
-	for _, entry := range a.sftp.remoteEntries {
+	for _, entry := range pane.entries {
 		if service.NormalizeSFTPRemotePath(entry.Path) == remotePath {
 			return true
 		}
 	}
 	return false
+}
+
+func sftpPaneName(pane sftpPaneIndex) string {
+	if pane == sftpPaneRight {
+		return "right"
+	}
+	return "left"
 }
 
 func (a *App) sftpTabIndex() int {

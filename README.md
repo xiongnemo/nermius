@@ -106,7 +106,7 @@ Inside the TUI object tabs:
 - `HOST / GROUP / PROFILE / IDENTITY / KEY / FORWARD / KNOWN-HOST` all support in-screen CRUD modals
 - `Enter` connects on `HOST`, toggles the selected tunnel on `FORWARD`, and opens a read-only detail view on every other tab
 - `d` opens detail, `e` opens edit, `a` opens a create form
-- `s` opens a dual-pane SFTP browser for the selected `HOST`
+- `s` opens a dual-pane SFTP browser for the selected `HOST`; `[` assigns the selected `HOST` to the left SFTP pane and `]` assigns it to the right pane
 - `Delete` or `x` opens delete confirmation; referenced objects are blocked and show who still depends on them
 - `/` opens a filter prompt for the current tab, and `r` reloads the lists
 - reference fields use searchable pickers, and ordered lists such as profiles, forwards, known-host host patterns, and identity auth methods use a dedicated list editor
@@ -126,9 +126,10 @@ Inside the TUI session view:
 
 Inside the TUI SFTP view:
 
-- the left pane is local files, and the right pane is the selected remote host
-- `Tab` switches panes, `Enter` enters directories, `Backspace` goes to the parent directory, `g` jumps to a typed path, and `r` refreshes
-- `u` uploads the focused local file into the remote directory, and `d` downloads the focused remote file into the local directory
+- each pane can be empty, local, or a remote host; `s` from `HOST` opens the quick layout with Local left and the selected remote host right
+- from `HOST`, `[` assigns the selected host to the left SFTP pane and `]` assigns it to the right pane; replacing a non-empty pane asks for confirmation
+- in SFTP, `Tab` switches panes, `l` makes an empty active pane local, `Enter` enters directories, `Backspace` goes to the parent directory, `g` jumps to a typed path, and `r` refreshes
+- `u` uploads from the local pane to the remote pane, and `d` downloads from the remote pane to the local pane; Local/Local and Remote/Remote transfer are not supported yet
 - remote `n` creates a directory, `x` or `Delete` removes a file or recursively removes a directory after confirmation, and `R` renames a remote path
 - file overwrite and remote delete actions require confirmation; v1 transfers regular files only, not whole directories
 

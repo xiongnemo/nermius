@@ -294,6 +294,18 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 					a.status = err.Error()
 				}
 			}
+		case '[':
+			if a.currentKind() == domain.KindHost {
+				if err := a.assignSelectedHostToSFTPPane(ctx, sftpPaneLeft); err != nil {
+					a.status = err.Error()
+				}
+			}
+		case ']':
+			if a.currentKind() == domain.KindHost {
+				if err := a.assignSelectedHostToSFTPPane(ctx, sftpPaneRight); err != nil {
+					a.status = err.Error()
+				}
+			}
 		case '/':
 			a.openFilterModal()
 		case ' ':
@@ -482,13 +494,13 @@ func (a *App) footerPrompt() string {
 	}
 	if a.inSFTPTab() {
 		if a.sftp == nil {
-			return "go to HOST and press s | F2 back | q/F10 quit"
+			return "go to HOST and press s/[ / ] | F2 back | q/F10 quit"
 		}
-		return "Tab pane | Enter open | Backspace parent | u upload | d download | n mkdir | x delete | R rename | g path | r refresh | c close | q/F10 quit"
+		return "Tab pane | l local | Enter open | Backspace parent | u upload | d download | n mkdir | x delete | R rename | g path | r refresh | c close | q/F10 quit"
 	}
 	enterAction := "Enter detail"
 	if a.currentKind() == domain.KindHost {
-		enterAction = "Enter/double-click connect | s SFTP"
+		enterAction = "Enter/double-click connect | s SFTP | [/] assign SFTP pane"
 	} else if a.currentKind() == domain.KindForward {
 		enterAction = "Enter/Space toggle"
 	}

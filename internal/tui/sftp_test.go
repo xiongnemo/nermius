@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/nermius/nermius/internal/domain"
 	"github.com/nermius/nermius/internal/service"
+	"github.com/nermius/nermius/internal/store"
 )
 
 func TestSFTPTabIndexAndFooter(t *testing.T) {
@@ -18,7 +20,7 @@ func TestSFTPTabIndexAndFooter(t *testing.T) {
 	if !app.inSFTPTab() {
 		t.Fatal("expected active SFTP tab")
 	}
-	if got := app.footerText(); !strings.Contains(got, "Go to HOST") && !strings.Contains(got, "go to HOST") {
+	if got := app.footerText(); !strings.Contains(got, "HOST") {
 		t.Fatalf("empty SFTP footer = %q, want host hint", got)
 	}
 }
@@ -27,28 +29,30 @@ func TestSFTPTogglePaneAndCursorClamp(t *testing.T) {
 	app := &App{
 		tabs: []domain.DocumentKind{domain.KindHost},
 		sftp: &sftpBrowserState{
-			activePane:    sftpPaneRemote,
-			remoteEntries: makeSFTPTestEntries("b", "a"),
+			activePane: sftpPaneRight,
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneRight: {kind: sftpPaneRemote, entries: makeSFTPTestEntries("b", "a")},
+			},
 		},
 	}
 	done, err := app.handleSFTPKey(nil, tcell.NewEventKey(tcell.KeyTAB, 0, tcell.ModNone))
 	if done || err != nil {
 		t.Fatalf("handleSFTPKey tab = done %v err %v", done, err)
 	}
-	if app.sftp.activePane != sftpPaneLocal {
-		t.Fatalf("active pane = %v, want local", app.sftp.activePane)
+	if app.sftp.activePane != sftpPaneLeft {
+		t.Fatalf("active pane = %v, want left", app.sftp.activePane)
 	}
-	app.sftp.activePane = sftpPaneRemote
+	app.sftp.activePane = sftpPaneRight
 	done, err = app.handleSFTPKey(nil, tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	if done || err != nil {
 		t.Fatalf("handleSFTPKey down = done %v err %v", done, err)
 	}
-	if app.sftp.remoteCursor != 1 {
-		t.Fatalf("remote cursor = %d, want 1", app.sftp.remoteCursor)
+	if app.sftp.panes[sftpPaneRight].cursor != 1 {
+		t.Fatalf("remote cursor = %d, want 1", app.sftp.panes[sftpPaneRight].cursor)
 	}
 	app.moveSFTPCursor(100)
-	if app.sftp.remoteCursor != 1 {
-		t.Fatalf("remote cursor after clamp = %d, want 1", app.sftp.remoteCursor)
+	if app.sftp.panes[sftpPaneRight].cursor != 1 {
+		t.Fatalf("remote cursor after clamp = %d, want 1", app.sftp.panes[sftpPaneRight].cursor)
 	}
 }
 
@@ -71,6 +75,86 @@ func TestSFTPLeftRightKeysNavigateTabs(t *testing.T) {
 	}
 	if !app.inSFTPTab() {
 		t.Fatalf("active tab = %d, want sftp tab %d", app.activeTab, app.sftpTabIndex())
+	}
+}
+
+func TestSFTPEmptyPaneCanBecomeLocal(t *testing.T) {
+	app := &App{
+		tabs: []domain.DocumentKind{domain.KindHost},
+		sftp: &sftpBrowserState{activePane: sftpPaneLeft},
+	}
+	done, err := app.handleSFTPKey(context.Background(), tcell.NewEventKey(tcell.KeyRune, 'l', tcell.ModNone))
+	if done || err != nil {
+		t.Fatalf("handleSFTPKey l = done %v err %v", done, err)
+	}
+	if got := app.sftp.panes[sftpPaneLeft].kind; got != sftpPaneLocal {
+		t.Fatalf("left pane kind = %q, want local", got)
+	}
+}
+
+func TestAssignSelectedHostToSFTPPaneOpensConfirmForConfiguredPane(t *testing.T) {
+	app := &App{
+		tabs:      []domain.DocumentKind{domain.KindHost},
+		activeTab: 0,
+		cursor:    0,
+		records: map[domain.DocumentKind][]store.DocumentSummary{
+			domain.KindHost: {{ID: "host-1", Label: "prod"}},
+		},
+		sftp: &sftpBrowserState{
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneLeft: {kind: sftpPaneLocal, path: "."},
+			},
+		},
+	}
+	if err := app.assignSelectedHostToSFTPPane(context.Background(), sftpPaneLeft); err != nil {
+		t.Fatalf("assignSelectedHostToSFTPPane returned error: %v", err)
+	}
+	if !app.hasModal() {
+		t.Fatal("expected replacement confirmation modal")
+	}
+}
+
+func TestHostBracketKeysAssignSFTPPane(t *testing.T) {
+	app := &App{
+		tabs:      []domain.DocumentKind{domain.KindHost},
+		activeTab: 0,
+		cursor:    0,
+		records: map[domain.DocumentKind][]store.DocumentSummary{
+			domain.KindHost: {{ID: "host-1", Label: "prod"}},
+		},
+		sftp: &sftpBrowserState{
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneLeft: {kind: sftpPaneLocal, path: "."},
+			},
+		},
+	}
+	done, err := app.handleKey(context.Background(), tcell.NewEventKey(tcell.KeyRune, '[', tcell.ModNone))
+	if done || err != nil {
+		t.Fatalf("handleKey [ = done %v err %v", done, err)
+	}
+	if !app.hasModal() {
+		t.Fatal("expected replacement confirmation modal")
+	}
+}
+
+func TestSFTPUploadDownloadRequireLocalRemotePair(t *testing.T) {
+	app := &App{
+		sftp: &sftpBrowserState{
+			activePane: sftpPaneLeft,
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneLeft:  {kind: sftpPaneLocal, path: "."},
+				sftpPaneRight: {kind: sftpPaneLocal, path: "."},
+			},
+		},
+	}
+	app.startSFTPUpload(context.Background())
+	if !strings.Contains(app.status, "not supported") {
+		t.Fatalf("upload status = %q, want unsupported message", app.status)
+	}
+	app.status = ""
+	app.startSFTPDownload(context.Background())
+	if !strings.Contains(app.status, "not supported") {
+		t.Fatalf("download status = %q, want unsupported message", app.status)
 	}
 }
 
