@@ -193,10 +193,12 @@ Behavior notes:
 
 - `vault keychain enable` stores the raw vault unlock material in the platform backend when supported.
 - by default, enrolled keychain unlocks do not require Windows Hello or another user-presence prompt, which keeps tests and normal commands non-interactive.
-- pass `vault keychain enable --require-presence` to require a user-presence check before the enrolled keychain material is loaded.
+- on Windows, `vault keychain enable --require-presence` enrolls a Windows CNG high-protection key instead of the default DPAPI blob. The CNG private key is non-exportable, requires OS-mediated authorization when used, and wraps the vault unlock material with RSA-OAEP-SHA256.
+- switching between default keychain enrollment and `--require-presence` re-enrolls the vault and removes the other local keychain blob.
 - normal commands auto-try the enrolled keychain backend first, then fall back to the master password.
 - `vault keychain status` reports both the unlock-material backend and the user-presence backend.
-- on Windows, unlock material is DPAPI-protected. When `--require-presence` is enabled, read/write authorization uses Windows Hello when available and falls back to the Windows credential prompt.
+- on Windows, default unlock material is DPAPI-protected. `--require-presence` moves the protection boundary into Windows CNG, so changing Nermius' SQLite metadata alone cannot silently downgrade the existing strong enrollment into a DPAPI unlock.
+- a malicious same-user process may still invoke Nermius or Windows APIs and cause an OS authorization prompt, deny access by deleting local key material, or wait for the user to approve a prompt. The strong mode is meant to prevent silent vault-key unwrap, not to defend against a fully compromised user session.
 - current-schema vaults use whole-vault encrypted records, so hostnames, usernames, labels, known-host payloads, and secrets are no longer stored as plaintext rows in SQLite.
 - `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault.
 

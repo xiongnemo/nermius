@@ -20,6 +20,7 @@ const (
 	metaWrappedKey              = "vault.wrapped_key"
 	metaVaultID                 = "vault.id"
 	metaSchemaVersion           = "vault.schema_version"
+	metaKeychainMode            = "vault.keychain_mode"
 	metaKeychainRequirePresence = "vault.keychain_require_presence"
 )
 
@@ -145,14 +146,26 @@ func (m *VaultManager) Status(ctx context.Context) (VaultStatus, error) {
 	if err != nil {
 		return VaultStatus{}, err
 	}
-	storeBackend := newUnlockMaterialStore(m.Paths)
+	mode, err := m.keychainMode(ctx, db)
+	if err != nil {
+		return VaultStatus{}, err
+	}
+	storeBackend := m.unlockStoreForMode(mode)
+	storeAvailable, _ := storeBackend.Available(ctx)
 	presence := newPresenceAuthorizer(m.Paths)
 	presenceAvailable, _ := presence.Available(ctx)
+	presenceKind := presence.Kind()
+	userPresenceCapable := presenceAvailable && presence.UserPresence()
+	if mode == KeychainModeStrongPresence && storeAvailable {
+		presenceKind = storeBackend.Kind()
+		userPresenceCapable = true
+	}
 	status := VaultStatus{
 		Initialized:         initialized,
+		KeychainMode:        mode,
 		BackendKind:         storeBackend.Kind(),
-		PresenceBackendKind: presence.Kind(),
-		UserPresenceCapable: presenceAvailable && presence.UserPresence(),
+		PresenceBackendKind: presenceKind,
+		UserPresenceCapable: userPresenceCapable,
 	}
 	if !initialized {
 		return status, nil
@@ -167,8 +180,7 @@ func (m *VaultManager) Status(ctx context.Context) (VaultStatus, error) {
 		return VaultStatus{}, err
 	}
 	status.CurrentVaultID = vaultID
-	available, _ := storeBackend.Available(ctx)
-	if available && vaultID != "" {
+	if storeAvailable && vaultID != "" {
 		enabled, err := storeBackend.IsEnrolled(ctx, vaultID)
 		if err != nil {
 			return VaultStatus{}, err
@@ -180,7 +192,7 @@ func (m *VaultManager) Status(ctx context.Context) (VaultStatus, error) {
 			if err != nil {
 				return VaultStatus{}, err
 			}
-			status.KeychainRequirePresence = requirePresence
+			status.KeychainRequirePresence = requirePresence || mode == KeychainModeStrongPresence
 		}
 	}
 	return status, nil
@@ -203,7 +215,11 @@ func (m *VaultManager) EnableKeychainWithOptions(ctx context.Context, password s
 	if err != nil {
 		return err
 	}
-	storeBackend := newUnlockMaterialStore(m.Paths)
+	mode := KeychainModePlatform
+	if opts.RequirePresence {
+		mode = KeychainModeStrongPresence
+	}
+	storeBackend := m.unlockStoreForMode(mode)
 	available, message := storeBackend.Available(ctx)
 	if !available {
 		if message == "" {
@@ -216,7 +232,20 @@ func (m *VaultManager) EnableKeychainWithOptions(ctx context.Context, password s
 		return err
 	}
 	defer zeroBytes(vaultKey)
+	if mode == KeychainModePlatform {
+		if err := m.removeOtherKeychainEnrollment(ctx, vaultID, mode); err != nil {
+			return err
+		}
+	}
 	if err := storeBackend.Store(ctx, vaultID, vaultKey); err != nil {
+		return err
+	}
+	if mode == KeychainModeStrongPresence {
+		if err := m.removeOtherKeychainEnrollment(ctx, vaultID, mode); err != nil {
+			return err
+		}
+	}
+	if err := m.setKeychainMode(ctx, db, mode); err != nil {
 		return err
 	}
 	return m.setKeychainRequirePresence(ctx, db, opts.RequirePresence)
@@ -232,7 +261,11 @@ func (m *VaultManager) DisableKeychain(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	storeBackend := newUnlockMaterialStore(m.Paths)
+	mode, err := m.keychainMode(ctx, db)
+	if err != nil {
+		return err
+	}
+	storeBackend := m.unlockStoreForMode(mode)
 	available, message := storeBackend.Available(ctx)
 	if !available {
 		if message == "" {
@@ -240,7 +273,16 @@ func (m *VaultManager) DisableKeychain(ctx context.Context) error {
 		}
 		return errors.New(message)
 	}
-	return storeBackend.Delete(ctx, vaultID)
+	if err := storeBackend.Delete(ctx, vaultID); err != nil {
+		return err
+	}
+	if err := m.removeOtherKeychainEnrollment(ctx, vaultID, mode); err != nil {
+		return err
+	}
+	if err := m.setKeychainRequirePresence(ctx, db, false); err != nil {
+		return err
+	}
+	return m.setKeychainMode(ctx, db, KeychainModePlatform)
 }
 
 func (m *VaultManager) ResolveMasterKey(ctx context.Context, prompt PasswordPrompter) ([]byte, *store.Store, error) {
@@ -399,7 +441,11 @@ func (m *VaultManager) resolveFromKeychain(ctx context.Context, db *store.Store,
 	if err != nil {
 		return nil, err
 	}
-	storeBackend := newUnlockMaterialStore(m.Paths)
+	mode, err := m.keychainMode(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	storeBackend := m.unlockStoreForMode(mode)
 	available, message := storeBackend.Available(ctx)
 	if !available {
 		if message == "" {
@@ -418,13 +464,52 @@ func (m *VaultManager) resolveFromKeychain(ctx context.Context, db *store.Store,
 	if err != nil {
 		return nil, err
 	}
-	if requirePresence {
+	if requirePresence && mode != KeychainModeStrongPresence {
 		presence := newPresenceAuthorizer(m.Paths)
 		if err := presence.Require(ctx, vaultID, intent); err != nil {
 			return nil, err
 		}
 	}
 	return storeBackend.Load(ctx, vaultID, intent)
+}
+
+func (m *VaultManager) unlockStoreForMode(mode string) UnlockMaterialStore {
+	if mode == KeychainModeStrongPresence {
+		return newStrongPresenceMaterialStore(m.Paths)
+	}
+	return newUnlockMaterialStore(m.Paths)
+}
+
+func (m *VaultManager) removeOtherKeychainEnrollment(ctx context.Context, vaultID, mode string) error {
+	if mode == KeychainModeStrongPresence {
+		return newUnlockMaterialStore(m.Paths).Delete(ctx, vaultID)
+	}
+	return newStrongPresenceMaterialStore(m.Paths).Delete(ctx, vaultID)
+}
+
+func (m *VaultManager) keychainMode(ctx context.Context, db *store.Store) (string, error) {
+	value, err := db.GetMeta(ctx, metaKeychainMode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return KeychainModePlatform, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	switch value {
+	case KeychainModePlatform, KeychainModeStrongPresence:
+		return value, nil
+	case "":
+		return KeychainModePlatform, nil
+	default:
+		return "", fmt.Errorf("unsupported keychain mode %q", value)
+	}
+}
+
+func (m *VaultManager) setKeychainMode(ctx context.Context, db *store.Store, mode string) error {
+	if mode == "" {
+		mode = KeychainModePlatform
+	}
+	return db.SetMeta(ctx, metaKeychainMode, mode)
 }
 
 func (m *VaultManager) keychainRequirePresence(ctx context.Context, db *store.Store) (bool, error) {

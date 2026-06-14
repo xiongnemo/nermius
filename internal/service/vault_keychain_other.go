@@ -17,6 +17,10 @@ func defaultUnlockMaterialStore(paths config.Paths) UnlockMaterialStore {
 	return &unavailableUnlockMaterialStore{}
 }
 
+func defaultStrongPresenceMaterialStore(paths config.Paths) UnlockMaterialStore {
+	return &unavailableUnlockMaterialStore{}
+}
+
 func defaultPresenceAuthorizer(paths config.Paths) PresenceAuthorizer {
 	return &unavailablePresenceAuthorizer{}
 }

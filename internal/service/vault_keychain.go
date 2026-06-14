@@ -15,6 +15,11 @@ const (
 	vaultAccessWrite vaultAccessIntent = "write"
 )
 
+const (
+	KeychainModePlatform       = "platform"
+	KeychainModeStrongPresence = "windows-cng-presence"
+)
+
 type UnlockMaterialStore interface {
 	Kind() string
 	Available(context.Context) (bool, string)
@@ -34,6 +39,7 @@ type PresenceAuthorizer interface {
 type VaultStatus struct {
 	Initialized             bool   `json:"initialized"`
 	KeychainEnabled         bool   `json:"keychain_enabled"`
+	KeychainMode            string `json:"keychain_mode,omitempty"`
 	KeychainRequirePresence bool   `json:"keychain_require_presence"`
 	BackendKind             string `json:"backend_kind,omitempty"`
 	PresenceBackendKind     string `json:"presence_backend,omitempty"`
@@ -48,8 +54,9 @@ type EnableKeychainOptions struct {
 }
 
 var (
-	newUnlockMaterialStore = defaultUnlockMaterialStore
-	newPresenceAuthorizer  = defaultPresenceAuthorizer
+	newUnlockMaterialStore         = defaultUnlockMaterialStore
+	newStrongPresenceMaterialStore = defaultStrongPresenceMaterialStore
+	newPresenceAuthorizer          = defaultPresenceAuthorizer
 )
 
 func unlockMaterialBlobPath(paths config.Paths, vaultID string) string {

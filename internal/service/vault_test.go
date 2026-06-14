@@ -46,7 +46,7 @@ func TestVaultStatusAndResolveKeychainDoesNotRequirePresenceByDefault(t *testing
 		},
 	}
 	fakePresence := &fakePresence{available: true, presence: true}
-	restore := installFakeVaultBackends(fakeStore, fakePresence)
+	restore := installFakeVaultBackends(fakeStore, &fakeUnlockStore{}, fakePresence)
 	defer restore()
 
 	status, err := manager.Status(ctx)
@@ -131,7 +131,7 @@ func TestResolveKeychainRequiresPresenceWhenEnabled(t *testing.T) {
 		},
 	}
 	fakePresence := &fakePresence{available: true, presence: true}
-	restore := installFakeVaultBackends(fakeStore, fakePresence)
+	restore := installFakeVaultBackends(fakeStore, &fakeUnlockStore{}, fakePresence)
 	defer restore()
 	if err := manager.setKeychainRequirePresence(ctx, db, true); err != nil {
 		t.Fatalf("setKeychainRequirePresence failed: %v", err)
@@ -166,6 +166,82 @@ func TestResolveKeychainRequiresPresenceWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestResolveStrongKeychainDoesNotUseAppLayerPresence(t *testing.T) {
+	ctx := context.Background()
+	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
+	if err := manager.Init(ctx, "master-pass"); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	db, err := manager.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+	expectedKey, err := manager.unwrapVaultKey(ctx, db, "master-pass")
+	if err != nil {
+		t.Fatalf("unwrapVaultKey failed: %v", err)
+	}
+	t.Cleanup(func() { zeroBytes(expectedKey) })
+
+	vaultID, err := manager.vaultID(ctx, db)
+	if err != nil {
+		t.Fatalf("vaultID failed: %v", err)
+	}
+	fakeStrongStore := &fakeUnlockStore{
+		available: true,
+		kind:      "fake-strong-keychain",
+		stored: map[string][]byte{
+			vaultID: append([]byte(nil), expectedKey...),
+		},
+		enrolled: map[string]bool{
+			vaultID: true,
+		},
+	}
+	fakePresence := &fakePresence{available: true, presence: true}
+	restore := installFakeVaultBackends(&fakeUnlockStore{}, fakeStrongStore, fakePresence)
+	defer restore()
+	if err := manager.setKeychainMode(ctx, db, KeychainModeStrongPresence); err != nil {
+		t.Fatalf("setKeychainMode failed: %v", err)
+	}
+	if err := manager.setKeychainRequirePresence(ctx, db, true); err != nil {
+		t.Fatalf("setKeychainRequirePresence failed: %v", err)
+	}
+
+	status, err := manager.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if !status.KeychainEnabled || !status.KeychainRequirePresence || status.KeychainMode != KeychainModeStrongPresence {
+		t.Fatalf("unexpected strong keychain status: %+v", status)
+	}
+	if status.PresenceBackendKind != "fake-strong-keychain" || !status.UserPresenceCapable {
+		t.Fatalf("expected strong keychain to report presence capability: %+v", status)
+	}
+	readKey, opened, err := manager.ResolveMasterKey(ctx, func(label string) (string, error) {
+		t.Fatalf("ResolveMasterKey unexpectedly prompted for %s", label)
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveMasterKey failed: %v", err)
+	}
+	defer opened.Close()
+	defer zeroBytes(readKey)
+	writeKey, err := manager.ResolveWriteKey(ctx, opened, func(label string) (string, error) {
+		t.Fatalf("ResolveWriteKey unexpectedly prompted for %s", label)
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveWriteKey failed: %v", err)
+	}
+	defer zeroBytes(writeKey)
+	if len(fakePresence.required) != 0 {
+		t.Fatalf("expected strong mode to skip app-layer presence, got %v", fakePresence.required)
+	}
+	if len(fakeStrongStore.loadIntents) != 2 || fakeStrongStore.loadIntents[0] != vaultAccessRead || fakeStrongStore.loadIntents[1] != vaultAccessWrite {
+		t.Fatalf("unexpected strong load intents: %v", fakeStrongStore.loadIntents)
+	}
+}
+
 func TestEnableKeychainWithOptionsStoresPresenceRequirement(t *testing.T) {
 	ctx := context.Background()
 	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
@@ -173,8 +249,9 @@ func TestEnableKeychainWithOptionsStoresPresenceRequirement(t *testing.T) {
 		t.Fatalf("Init failed: %v", err)
 	}
 	fakeStore := &fakeUnlockStore{available: true}
+	fakeStrongStore := &fakeUnlockStore{available: true, kind: "fake-strong-keychain"}
 	fakePresence := &fakePresence{available: true, presence: true}
-	restore := installFakeVaultBackends(fakeStore, fakePresence)
+	restore := installFakeVaultBackends(fakeStore, fakeStrongStore, fakePresence)
 	defer restore()
 
 	if err := manager.EnableKeychainWithOptions(ctx, "master-pass", EnableKeychainOptions{RequirePresence: true}); err != nil {
@@ -184,8 +261,14 @@ func TestEnableKeychainWithOptionsStoresPresenceRequirement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status failed: %v", err)
 	}
-	if !status.KeychainEnabled || !status.KeychainRequirePresence {
+	if !status.KeychainEnabled || !status.KeychainRequirePresence || status.KeychainMode != KeychainModeStrongPresence {
 		t.Fatalf("unexpected keychain status after enable: %+v", status)
+	}
+	if len(fakeStrongStore.stored) != 1 || len(fakeStrongStore.enrolled) != 1 {
+		t.Fatalf("expected strong store enrollment, got stored=%v enrolled=%v", fakeStrongStore.stored, fakeStrongStore.enrolled)
+	}
+	if len(fakeStore.stored) != 0 || len(fakeStore.enrolled) != 0 {
+		t.Fatalf("expected platform store to be cleared after strong enable, got stored=%v enrolled=%v", fakeStore.stored, fakeStore.enrolled)
 	}
 
 	if err := manager.EnableKeychain(ctx, "master-pass"); err != nil {
@@ -195,8 +278,14 @@ func TestEnableKeychainWithOptionsStoresPresenceRequirement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status failed: %v", err)
 	}
-	if !status.KeychainEnabled || status.KeychainRequirePresence {
+	if !status.KeychainEnabled || status.KeychainRequirePresence || status.KeychainMode != KeychainModePlatform {
 		t.Fatalf("expected default enable to disable presence requirement: %+v", status)
+	}
+	if len(fakeStore.stored) != 1 || len(fakeStore.enrolled) != 1 {
+		t.Fatalf("expected platform store enrollment, got stored=%v enrolled=%v", fakeStore.stored, fakeStore.enrolled)
+	}
+	if len(fakeStrongStore.stored) != 0 || len(fakeStrongStore.enrolled) != 0 {
+		t.Fatalf("expected strong store to be cleared after platform enable, got stored=%v enrolled=%v", fakeStrongStore.stored, fakeStrongStore.enrolled)
 	}
 }
 
@@ -305,12 +394,18 @@ func TestMigrateVaultMovesLegacyDataIntoEncryptedRecords(t *testing.T) {
 
 type fakeUnlockStore struct {
 	available   bool
+	kind        string
 	stored      map[string][]byte
 	enrolled    map[string]bool
 	loadIntents []vaultAccessIntent
 }
 
-func (f *fakeUnlockStore) Kind() string { return "fake-keychain" }
+func (f *fakeUnlockStore) Kind() string {
+	if f.kind != "" {
+		return f.kind
+	}
+	return "fake-keychain"
+}
 
 func (f *fakeUnlockStore) Available(ctx context.Context) (bool, string) {
 	if f.available {
@@ -372,13 +467,16 @@ func (f *fakePresence) Require(ctx context.Context, vaultID string, intent vault
 	return nil
 }
 
-func installFakeVaultBackends(storeBackend UnlockMaterialStore, presence PresenceAuthorizer) func() {
+func installFakeVaultBackends(storeBackend UnlockMaterialStore, strongBackend UnlockMaterialStore, presence PresenceAuthorizer) func() {
 	prevStore := newUnlockMaterialStore
+	prevStrongStore := newStrongPresenceMaterialStore
 	prevPresence := newPresenceAuthorizer
 	newUnlockMaterialStore = func(paths config.Paths) UnlockMaterialStore { return storeBackend }
+	newStrongPresenceMaterialStore = func(paths config.Paths) UnlockMaterialStore { return strongBackend }
 	newPresenceAuthorizer = func(paths config.Paths) PresenceAuthorizer { return presence }
 	return func() {
 		newUnlockMaterialStore = prevStore
+		newStrongPresenceMaterialStore = prevStrongStore
 		newPresenceAuthorizer = prevPresence
 	}
 }
