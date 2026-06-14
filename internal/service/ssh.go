@@ -348,8 +348,12 @@ func (s *EmbeddedSession) Done() <-chan error {
 func (s *EmbeddedSession) Close() error {
 	var err error
 	s.waitOnce.Do(func() {
-		_ = s.session.Close()
-		_ = s.client.Close()
+		if s.session != nil {
+			_ = s.session.Close()
+		}
+		if s.client != nil {
+			_ = s.client.Close()
+		}
 		err = closeAll(s.closers)
 	})
 	return err

@@ -237,15 +237,9 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 	case tcell.KeyEscape, tcell.KeyCtrlC, tcell.KeyF10:
 		return true, nil
 	case tcell.KeyLeft:
-		if a.activeTab > 0 {
-			a.setActiveTab(a.activeTab - 1)
-			a.cursor = 0
-		}
+		a.moveActiveTab(-1)
 	case tcell.KeyRight:
-		if a.activeTab < a.sftpTabIndex() {
-			a.setActiveTab(a.activeTab + 1)
-			a.cursor = 0
-		}
+		a.moveActiveTab(1)
 	case tcell.KeyUp:
 		if a.cursor > 0 {
 			a.cursor--
@@ -1510,6 +1504,18 @@ func (a *App) setActiveTab(index int) {
 	a.transitionSessionFocus(previous, a.currentSession())
 }
 
+func (a *App) moveActiveTab(delta int) {
+	if delta == 0 {
+		return
+	}
+	next := a.activeTab + delta
+	if next < 0 || next > a.sftpTabIndex() {
+		return
+	}
+	a.setActiveTab(next)
+	a.cursor = 0
+}
+
 func (a *App) setActiveSession(index int) {
 	if index < 0 || index >= len(a.sessions) {
 		return
@@ -1559,6 +1565,9 @@ func (a *App) closeSessionAt(index int) {
 	}
 	if len(a.sessions) == 0 {
 		a.activeSession = 0
+		if a.inSessionTab() {
+			a.setActiveTab(0)
+		}
 	} else if a.activeSession >= len(a.sessions) {
 		a.activeSession = len(a.sessions) - 1
 	}

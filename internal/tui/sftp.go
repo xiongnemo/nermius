@@ -178,6 +178,10 @@ func readLocalSFTPEntries(localPath string) ([]service.SFTPEntry, error) {
 func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 	if a.sftp == nil {
 		switch ev.Key() {
+		case tcell.KeyLeft:
+			a.moveActiveTab(-1)
+		case tcell.KeyRight:
+			a.moveActiveTab(1)
 		case tcell.KeyF2:
 			a.setActiveTab(0)
 		case tcell.KeyF10, tcell.KeyEscape:
@@ -192,6 +196,10 @@ func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, erro
 	switch ev.Key() {
 	case tcell.KeyF10:
 		return true, nil
+	case tcell.KeyLeft:
+		a.moveActiveTab(-1)
+	case tcell.KeyRight:
+		a.moveActiveTab(1)
 	case tcell.KeyEscape, tcell.KeyF2:
 		a.setActiveTab(0)
 	case tcell.KeyTAB, tcell.KeyBacktab:

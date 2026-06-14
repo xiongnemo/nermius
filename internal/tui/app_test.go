@@ -272,6 +272,48 @@ func TestCopyPasteShortcuts(t *testing.T) {
 	}
 }
 
+func TestCloseLastSessionReturnsToFirstTab(t *testing.T) {
+	app := &App{
+		tabs:          []domain.DocumentKind{domain.KindHost, domain.KindIdentity},
+		activeTab:     2,
+		activeSession: 0,
+		focused:       true,
+		scrollOffsets: map[*service.EmbeddedSession]int{},
+		sessions:      []*service.EmbeddedSession{{Name: "one", Terminal: termemu.New(4, 2)}},
+	}
+	app.closeSessionAt(0)
+	if len(app.sessions) != 0 {
+		t.Fatalf("sessions len = %d, want 0", len(app.sessions))
+	}
+	if app.activeTab != 0 {
+		t.Fatalf("active tab = %d, want first tab", app.activeTab)
+	}
+}
+
+func TestCloseSessionKeepsSessionsTabWhenSessionsRemain(t *testing.T) {
+	app := &App{
+		tabs:          []domain.DocumentKind{domain.KindHost, domain.KindIdentity},
+		activeTab:     2,
+		activeSession: 1,
+		focused:       true,
+		scrollOffsets: map[*service.EmbeddedSession]int{},
+		sessions: []*service.EmbeddedSession{
+			{Name: "one", Terminal: termemu.New(4, 2)},
+			{Name: "two", Terminal: termemu.New(4, 2)},
+		},
+	}
+	app.closeSessionAt(1)
+	if len(app.sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(app.sessions))
+	}
+	if !app.inSessionTab() {
+		t.Fatalf("active tab = %d, want sessions tab %d", app.activeTab, len(app.tabs))
+	}
+	if app.activeSession != 0 {
+		t.Fatalf("active session = %d, want 0", app.activeSession)
+	}
+}
+
 func TestTabIndexAt(t *testing.T) {
 	tabs := []domain.DocumentKind{domain.KindHost, domain.KindGroup, domain.DocumentKind("sessions")}
 	index, ok := tabIndexAt(2, 0, tabs)

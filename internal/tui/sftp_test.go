@@ -52,6 +52,28 @@ func TestSFTPTogglePaneAndCursorClamp(t *testing.T) {
 	}
 }
 
+func TestSFTPLeftRightKeysNavigateTabs(t *testing.T) {
+	app := &App{
+		tabs: []domain.DocumentKind{domain.KindHost, domain.KindIdentity},
+		sftp: &sftpBrowserState{},
+	}
+	app.setActiveTab(app.sftpTabIndex())
+	done, err := app.handleSFTPKey(nil, tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModNone))
+	if done || err != nil {
+		t.Fatalf("handleSFTPKey left = done %v err %v", done, err)
+	}
+	if !app.inSessionTab() {
+		t.Fatalf("active tab = %d, want sessions tab %d", app.activeTab, len(app.tabs))
+	}
+	done, err = app.handleSFTPKey(nil, tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone))
+	if done || err != nil {
+		t.Fatalf("handleSFTPKey right = done %v err %v", done, err)
+	}
+	if !app.inSFTPTab() {
+		t.Fatalf("active tab = %d, want sftp tab %d", app.activeTab, app.sftpTabIndex())
+	}
+}
+
 func TestReadLocalSFTPEntriesSortsDirectoriesFirst(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "z.txt"), []byte("z"), 0600); err != nil {
