@@ -211,7 +211,7 @@ func (a *App) renderModal() {
 }
 
 func (a *App) openAddForm(ctx context.Context) error {
-	if a.inSessionTab() {
+	if a.inSessionTab() || a.inSFTPTab() {
 		return nil
 	}
 	form, err := a.buildFormModal(ctx, a.currentKind(), "", true)
@@ -223,6 +223,9 @@ func (a *App) openAddForm(ctx context.Context) error {
 }
 
 func (a *App) openEditForm(ctx context.Context) error {
+	if a.inSFTPTab() {
+		return nil
+	}
 	if top := a.topModal(); top != nil && top.kind == modalKindDetail && top.detail != nil {
 		form, err := a.buildFormModal(ctx, top.detail.kind, top.detail.id, false)
 		if err != nil {
@@ -245,7 +248,7 @@ func (a *App) openEditForm(ctx context.Context) error {
 
 func (a *App) openDetailModal(ctx context.Context) error {
 	record := a.selectedRecord()
-	if record.ID == "" || a.inSessionTab() {
+	if record.ID == "" || a.inSessionTab() || a.inSFTPTab() {
 		return nil
 	}
 	detail, err := a.buildDetailModal(ctx, a.currentKind(), record.ID)
@@ -258,7 +261,7 @@ func (a *App) openDetailModal(ctx context.Context) error {
 
 func (a *App) openDeleteConfirm(ctx context.Context) error {
 	record := a.selectedRecord()
-	if record.ID == "" || a.inSessionTab() {
+	if record.ID == "" || a.inSessionTab() || a.inSFTPTab() {
 		return nil
 	}
 	if a.currentKind() != domain.KindKnownHost {

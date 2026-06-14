@@ -10,6 +10,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
 - CRUD for `host`, `group`, `profile`, `identity`, `key`, `forward`
 - Saved host key inspection with `known-host list|delete`
 - Resolved host inspection with `inspect <host>`
+- SFTP browsing and file transfer via `sftp ls|stat|get|put|mkdir|rm|rename`
 - OpenSSH import via `import openssh --config ~/.ssh/config`
 - Termius local export/import via `termius export|import`
 - Termix backend registration via `backend termix add|list|show`
@@ -22,7 +23,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
   - saved and one-shot `-L/-R/-D` forwards
   - SSH-style debug verbosity via `-v`, `-vv`, `-vvv`
   - remote command execution via `exec <host> <command>`
-- TUI CRUD tabs for `host`, `group`, `profile`, `identity`, `key`, `forward`, `known-host`, plus embedded SSH session tabs
+- TUI CRUD tabs for `host`, `group`, `profile`, `identity`, `key`, `forward`, `known-host`, plus embedded SSH session and SFTP tabs
 
 ## Build
 
@@ -70,6 +71,8 @@ nermius connect my-host
 nermius -vv connect my-host
 nermius exec my-host hostname
 nermius forward start prod-db
+nermius sftp ls my-host:/var/log
+nermius sftp get my-host:/var/log/syslog .\syslog
 
 # 7. Open the TUI for browsing objects and sessions.
 nermius tui
@@ -103,6 +106,7 @@ Inside the TUI object tabs:
 - `HOST / GROUP / PROFILE / IDENTITY / KEY / FORWARD / KNOWN-HOST` all support in-screen CRUD modals
 - `Enter` connects on `HOST`, toggles the selected tunnel on `FORWARD`, and opens a read-only detail view on every other tab
 - `d` opens detail, `e` opens edit, `a` opens a create form
+- `s` opens a dual-pane SFTP browser for the selected `HOST`
 - `Delete` or `x` opens delete confirmation; referenced objects are blocked and show who still depends on them
 - `/` opens a filter prompt for the current tab, and `r` reloads the lists
 - reference fields use searchable pickers, and ordered lists such as profiles, forwards, known-host host patterns, and identity auth methods use a dedicated list editor
@@ -119,6 +123,14 @@ Inside the TUI session view:
 - use `Ctrl+Shift+C` and `Ctrl+Shift+V` for local copy/paste
 - alt-screen apps stay isolated from local shell scrollback
 - remote `OSC 52`, focus reporting, bracketed paste, and cursor-shape changes are forwarded when the remote app enables them
+
+Inside the TUI SFTP view:
+
+- the left pane is local files, and the right pane is the selected remote host
+- `Tab` switches panes, `Enter` enters directories, `Backspace` goes to the parent directory, `g` jumps to a typed path, and `r` refreshes
+- `u` uploads the focused local file into the remote directory, and `d` downloads the focused remote file into the local directory
+- remote `n` creates a directory, `x` or `Delete` removes a file or recursively removes a directory after confirmation, and `R` renames a remote path
+- file overwrite and remote delete actions require confirmation; v1 transfers regular files only, not whole directories
 
 Typical interactive path:
 
@@ -322,6 +334,23 @@ nermius -vvv exec my-host "uname -a"
 ```
 
 `-v` prints high-level SSH decisions such as host key acceptance. `-vv` adds host key backend details and preferred host key algorithms. `-vvv` also includes low-level auth method selection.
+
+## SFTP
+
+SFTP commands reuse the same host resolution and SSH transport as `connect` and `exec`, including profiles, identities, private keys, agent auth, known-host policy, ProxyJump chains, outbound proxies, and vault prompts. Remote paths use `<host>:<path>`:
+
+```powershell
+nermius sftp ls prod:/var/log
+nermius sftp stat prod:/var/log/syslog --json
+nermius sftp get prod:/var/log/syslog .\syslog
+nermius sftp put .\deploy.zip prod:/tmp/deploy.zip
+nermius sftp mkdir prod:/tmp/releases -p
+nermius sftp rename prod:/tmp/deploy.zip /tmp/releases/deploy.zip
+nermius sftp rm prod:/tmp/releases/deploy.zip
+nermius sftp rm prod:/tmp/releases --recursive
+```
+
+`get` and `put` transfer regular files. Existing destinations prompt before overwrite when running in an interactive terminal; pass `--force` for non-interactive overwrites. `rm` prompts before deletion unless `--force` is set, and directories require `--recursive`.
 
 ## Port Forwarding
 

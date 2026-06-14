@@ -34,6 +34,7 @@ type App struct {
 	hostAddresses    map[string]string
 	sessions         []*service.EmbeddedSession
 	activeSession    int
+	sftp             *sftpBrowserState
 	runningForwards  map[string]*forwardRuntime
 	status           string
 	cursorBlinkOn    bool
@@ -125,6 +126,7 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 		return err
 	}
 	defer app.closeRunningForwards()
+	defer app.closeSFTP()
 	return app.loop(ctx)
 }
 
@@ -151,6 +153,7 @@ func (a *App) loop(ctx context.Context) error {
 			}
 			a.collectSessionUpdates()
 			a.collectForwardUpdates()
+			a.collectSFTPUpdates(ctx)
 		case ev := <-events:
 			switch event := ev.(type) {
 			case *tcell.EventResize:
@@ -227,6 +230,9 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			return false, a.forwardSessionKey(ev)
 		}
 	}
+	if a.inSFTPTab() {
+		return a.handleSFTPKey(ctx, ev)
+	}
 	switch ev.Key() {
 	case tcell.KeyEscape, tcell.KeyCtrlC, tcell.KeyF10:
 		return true, nil
@@ -236,7 +242,7 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			a.cursor = 0
 		}
 	case tcell.KeyRight:
-		if a.activeTab < len(a.tabs) {
+		if a.activeTab < a.sftpTabIndex() {
 			a.setActiveTab(a.activeTab + 1)
 			a.cursor = 0
 		}
@@ -288,6 +294,12 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			if err := a.reload(ctx); err != nil {
 				a.status = err.Error()
 			}
+		case 's':
+			if a.currentKind() == domain.KindHost {
+				if err := a.openSelectedHostSFTP(ctx); err != nil {
+					a.status = err.Error()
+				}
+			}
 		case '/':
 			a.openFilterModal()
 		case ' ':
@@ -317,7 +329,7 @@ func (a *App) handleMouse(ctx context.Context, ev *tcell.EventMouse) (bool, erro
 	}()
 
 	if pressedPrimary(buttons, prevButtons) {
-		if tab, ok := tabIndexAt(x, y, append(a.tabs, domain.DocumentKind("sessions"))); ok {
+		if tab, ok := tabIndexAt(x, y, sftpTabKinds(a.tabs)); ok {
 			a.setActiveTab(tab)
 			a.cursor = 0
 			a.resetCursorBlink()
@@ -342,6 +354,10 @@ func (a *App) handleMouse(ctx context.Context, ev *tcell.EventMouse) (bool, erro
 				a.resetCursorBlink()
 			}
 		}
+		return false, nil
+	}
+	if a.inSFTPTab() {
+		a.handleSFTPMouse(ctx, ev, prevButtons)
 		return false, nil
 	}
 
@@ -422,7 +438,7 @@ func (a *App) render() {
 	tabStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorWhite)
 	activeStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorDarkCyan)
 	x := 0
-	for idx, kind := range append(a.tabs, domain.DocumentKind("sessions")) {
+	for idx, kind := range sftpTabKinds(a.tabs) {
 		label := " " + strings.ToUpper(string(kind)) + " "
 		style := tabStyle
 		if idx == a.activeTab {
@@ -433,6 +449,8 @@ func (a *App) render() {
 	}
 	if a.inSessionTab() {
 		a.renderSessions(w, h)
+	} else if a.inSFTPTab() {
+		a.renderSFTP(w, h)
 	} else {
 		a.renderList(w, h)
 	}
@@ -468,9 +486,15 @@ func (a *App) footerPrompt() string {
 		}
 		return "click tabs/sessions | wheel scrollback | drag select | Shift forces local mouse | Ctrl+Shift+C/V copy/paste | F2 back | F6 next | F8 close | q/F10 quit"
 	}
+	if a.inSFTPTab() {
+		if a.sftp == nil {
+			return "go to HOST and press s | F2 back | q/F10 quit"
+		}
+		return "Tab pane | Enter open | Backspace parent | u upload | d download | n mkdir | x delete | R rename | g path | r refresh | c close | q/F10 quit"
+	}
 	enterAction := "Enter detail"
 	if a.currentKind() == domain.KindHost {
-		enterAction = "Enter/double-click connect"
+		enterAction = "Enter/double-click connect | s SFTP"
 	} else if a.currentKind() == domain.KindForward {
 		enterAction = "Enter/Space toggle"
 	}
@@ -661,8 +685,11 @@ func (a *App) collectForwardUpdates() {
 }
 
 func (a *App) currentKind() domain.DocumentKind {
-	if a.activeTab >= len(a.tabs) {
+	if a.inSessionTab() {
 		return domain.DocumentKind("sessions")
+	}
+	if a.inSFTPTab() {
+		return domain.DocumentKind("sftp")
 	}
 	return a.tabs[a.activeTab]
 }
@@ -1475,7 +1502,7 @@ func (a *App) adjustScrollOffset(session *service.EmbeddedSession, delta int, ma
 }
 
 func (a *App) setActiveTab(index int) {
-	if index < 0 || index > len(a.tabs) {
+	if index < 0 || index > a.sftpTabIndex() {
 		return
 	}
 	previous := a.currentSession()

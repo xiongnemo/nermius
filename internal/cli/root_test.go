@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -340,6 +341,87 @@ func TestCompletionSuggestsBackendTermixSubcommand(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("termix")) {
 		t.Fatalf("expected completion to suggest termix, got:\n%s", out.String())
+	}
+}
+
+func TestRootHelpIncludesSFTPCommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(--help) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("sftp")) {
+		t.Fatalf("expected help to include sftp, got:\n%s", out.String())
+	}
+}
+
+func TestSFTPHelpIncludesTransferCommands(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"sftp", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(sftp --help) returned error: %v", err)
+	}
+	help := out.String()
+	for _, want := range []string{"ls", "get", "put", "mkdir", "rm", "rename"} {
+		if !bytes.Contains([]byte(help), []byte(want)) {
+			t.Fatalf("expected sftp help to include %q, got:\n%s", want, help)
+		}
+	}
+}
+
+func TestCompletionSuggestsSFTPSubcommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "sftp", "g"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete sftp g) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("get")) {
+		t.Fatalf("expected completion to suggest get, got:\n%s", out.String())
+	}
+}
+
+func TestCompletionSuggestsSFTPForceFlag(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "sftp", "get", "host:/tmp/file", "local", "--f"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete sftp get --f) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("--force")) {
+		t.Fatalf("expected completion to suggest --force, got:\n%s", out.String())
+	}
+}
+
+func TestLocalDownloadPreviewDetectsDirectoryTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "app.log")
+	destination, exists, err := localDownloadPreview("/var/log/app.log", dir)
+	if err != nil {
+		t.Fatalf("localDownloadPreview returned error: %v", err)
+	}
+	if destination != target || exists {
+		t.Fatalf("preview = %q exists=%v, want %q false", destination, exists, target)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	destination, exists, err = localDownloadPreview("/var/log/app.log", dir)
+	if err != nil {
+		t.Fatalf("localDownloadPreview existing returned error: %v", err)
+	}
+	if destination != target || !exists {
+		t.Fatalf("preview = %q exists=%v, want %q true", destination, exists, target)
 	}
 }
 

@@ -49,6 +49,11 @@ func (a *App) handleDetailModalKey(ctx context.Context, modal *detailModal, ev *
 				a.popModal()
 				return false, a.openHostSessionByID(ctx, modal.id)
 			}
+		case 's':
+			if modal.canConnect && modal.kind == domain.KindHost {
+				a.popModal()
+				return false, a.openHostSFTP(ctx, modal.id, "")
+			}
 		}
 	}
 	return false, nil
@@ -348,7 +353,7 @@ func (a *App) renderDetailModal(modal *detailModal) {
 		footer = "e edit | " + footer
 	}
 	if modal.canConnect {
-		footer = "Enter/c connect | " + footer
+		footer = "Enter/c connect | s SFTP | " + footer
 	}
 	a.drawModalBox(x, y, w, h, modal.title, footer)
 	maxLines := max(1, h-4)

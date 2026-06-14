@@ -65,6 +65,7 @@ func newRootCommand(rt *runtime) *cobra.Command {
 		rt.newTermiusCmd(),
 		rt.newConnectCmd(),
 		rt.newExecCmd(),
+		rt.newSFTPCmd(),
 		rt.newTUICmd(),
 	)
 	return root
