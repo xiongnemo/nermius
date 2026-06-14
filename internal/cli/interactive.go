@@ -593,6 +593,23 @@ func promptForwardInteractive(ctx context.Context, catalog *service.Catalog, def
 	return out, err
 }
 
+func promptWorkspaceInteractive(defaults domain.Workspace) (domain.Workspace, error) {
+	out := defaults
+	var err error
+	out.Name, err = promptLine("Name", defaults.Name, true)
+	if err != nil {
+		return out, err
+	}
+	out.Description, err = promptLine("Description", defaults.Description, false)
+	if err != nil {
+		return out, err
+	}
+	if out.Root == nil {
+		out.Root = &domain.WorkspaceNode{Pane: &domain.WorkspacePane{Type: domain.WorkspacePaneEmpty}}
+	}
+	return out, nil
+}
+
 func buildInteractiveDocument(ctx context.Context, catalog *service.Catalog, kind domain.DocumentKind) (any, error) {
 	switch kind {
 	case domain.KindHost:
@@ -607,6 +624,8 @@ func buildInteractiveDocument(ctx context.Context, catalog *service.Catalog, kin
 		return promptKeyInteractive(domain.Key{})
 	case domain.KindForward:
 		return promptForwardInteractive(ctx, catalog, domain.Forward{})
+	case domain.KindWorkspace:
+		return promptWorkspaceInteractive(domain.Workspace{})
 	default:
 		return nil, fmt.Errorf("interactive mode is not supported for %s", kind)
 	}

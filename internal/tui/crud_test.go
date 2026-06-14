@@ -205,7 +205,7 @@ func newTestAppWithCatalog(t *testing.T) (*App, func()) {
 	app := &App{
 		catalog:         service.NewCatalog(db, []byte("01234567890123456789012345678901")),
 		paths:           paths,
-		tabs:            []domain.DocumentKind{domain.KindHost, domain.KindGroup, domain.KindProfile, domain.KindIdentity, domain.KindKey, domain.KindForward, domain.KindKnownHost},
+		tabs:            []domain.DocumentKind{domain.KindHost, domain.KindGroup, domain.KindProfile, domain.KindIdentity, domain.KindKey, domain.KindForward, domain.KindWorkspace, domain.KindKnownHost},
 		records:         map[domain.DocumentKind][]store.DocumentSummary{},
 		filters:         map[domain.DocumentKind]string{},
 		hostAddresses:   map[string]string{},

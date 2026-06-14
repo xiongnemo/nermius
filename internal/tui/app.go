@@ -36,6 +36,7 @@ type App struct {
 	records          map[domain.DocumentKind][]store.DocumentSummary
 	filters          map[domain.DocumentKind]string
 	hostAddresses    map[string]string
+	workspace        *workspaceState
 	sessions         []*service.EmbeddedSession
 	sessionRuntimes  map[*service.EmbeddedSession]*sessionRuntime
 	activeSession    int
@@ -56,6 +57,11 @@ type App struct {
 	modals           []modalState
 	exitRequested    bool
 }
+
+const (
+	workspaceTabKind domain.DocumentKind = "workspace_view"
+	sftpTabKind      domain.DocumentKind = "sftp"
+)
 
 type forwardRuntimeStatus string
 
@@ -136,6 +142,7 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 			domain.KindIdentity,
 			domain.KindKey,
 			domain.KindForward,
+			domain.KindWorkspace,
 			domain.KindKnownHost,
 		},
 		records:         map[domain.DocumentKind][]store.DocumentSummary{},
@@ -192,10 +199,7 @@ func (a *App) loop(ctx context.Context) error {
 			switch event := ev.(type) {
 			case *tcell.EventResize:
 				a.screen.Sync()
-				if a.inSessionTab() && a.activeSession < len(a.sessions) {
-					w, h := a.screen.Size()
-					_ = a.sessions[a.activeSession].Resize(w, max(1, h-3))
-				}
+				a.resizeWorkspaceSessions()
 			case *tcell.EventFocus:
 				a.setFocused(event.Focused)
 			case *tcell.EventKey:
@@ -227,7 +231,7 @@ func (a *App) loop(ctx context.Context) error {
 }
 
 func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
-	if a.inSessionTab() && a.activeSession < len(a.sessions) {
+	if a.inSessionTab() {
 		if isCopyShortcut(ev) {
 			a.copySelection()
 			return false, nil
@@ -246,19 +250,90 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 				a.setActiveTab(len(a.tabs) - 1)
 			}
 			return false, nil
+		case tcell.KeyF3:
+			return false, a.openWorkspacePicker(ctx)
+		case tcell.KeyF4:
+			a.openSaveWorkspacePrompt(ctx)
+			return false, nil
+		case tcell.KeyF5:
+			return false, a.openHostPickerForFocusedPane(ctx)
 		case tcell.KeyF6:
-			if len(a.sessions) > 0 {
-				a.setActiveSession((a.activeSession + 1) % len(a.sessions))
+			a.focusNextWorkspacePane()
+			a.resetCursorBlink()
+			return false, nil
+		case tcell.KeyF7:
+			return false, a.splitFocusedWorkspacePane(ctx, domain.WorkspaceSplitHorizontal, "", "")
+		case tcell.KeyF8:
+			a.requestCloseFocusedWorkspacePane()
+			a.resetCursorBlink()
+			return false, nil
+		case tcell.KeyF9:
+			return false, a.splitFocusedWorkspacePane(ctx, domain.WorkspaceSplitVertical, "", "")
+		case tcell.KeyF11:
+			if a.workspace != nil {
+				a.workspace.zoomed = !a.workspace.zoomed
+				a.resizeWorkspaceSessions()
+			}
+			return false, nil
+		case tcell.KeyEnter:
+			if a.workspace != nil {
+				if pane := a.workspace.focusedPane(); pane != nil && pane.session == nil && pane.hostID != "" {
+					if err := a.connectWorkspacePane(ctx, pane); err != nil {
+						a.status = err.Error()
+					}
+					a.resetCursorBlink()
+					return false, nil
+				}
 			}
 			a.resetCursorBlink()
-			return false, nil
-		case tcell.KeyF8:
-			a.requestCloseSession(a.activeSession)
-			a.resetCursorBlink()
-			return false, nil
+			return false, a.forwardSessionKey(ev)
 		case tcell.KeyEscape:
 			if a.selection.Active && a.selection.Session == a.currentSession() {
 				a.clearSelection()
+				return false, nil
+			}
+			a.resetCursorBlink()
+			return false, a.forwardSessionKey(ev)
+		case tcell.KeyLeft:
+			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
+				a.resizeFocusedWorkspacePane(-5, 0)
+				return false, nil
+			}
+			if ev.Modifiers()&tcell.ModAlt != 0 {
+				a.focusWorkspaceDirection(-1, 0)
+				return false, nil
+			}
+			a.resetCursorBlink()
+			return false, a.forwardSessionKey(ev)
+		case tcell.KeyRight:
+			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
+				a.resizeFocusedWorkspacePane(5, 0)
+				return false, nil
+			}
+			if ev.Modifiers()&tcell.ModAlt != 0 {
+				a.focusWorkspaceDirection(1, 0)
+				return false, nil
+			}
+			a.resetCursorBlink()
+			return false, a.forwardSessionKey(ev)
+		case tcell.KeyUp:
+			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
+				a.resizeFocusedWorkspacePane(0, -5)
+				return false, nil
+			}
+			if ev.Modifiers()&tcell.ModAlt != 0 {
+				a.focusWorkspaceDirection(0, -1)
+				return false, nil
+			}
+			a.resetCursorBlink()
+			return false, a.forwardSessionKey(ev)
+		case tcell.KeyDown:
+			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
+				a.resizeFocusedWorkspacePane(0, 5)
+				return false, nil
+			}
+			if ev.Modifiers()&tcell.ModAlt != 0 {
+				a.focusWorkspaceDirection(0, 1)
 				return false, nil
 			}
 			a.resetCursorBlink()
@@ -268,6 +343,9 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 				if a.reconnectCurrentSession(ctx) {
 					return false, nil
 				}
+			}
+			if ev.Key() == tcell.KeyRune && ev.Rune() == 'D' {
+				return false, a.duplicateFocusedWorkspacePane(ctx)
 			}
 			a.resetCursorBlink()
 			return false, a.forwardSessionKey(ev)
@@ -301,6 +379,10 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			if err := a.toggleSelectedForward(ctx); err != nil {
 				a.status = err.Error()
 			}
+		} else if a.currentKind() == domain.KindWorkspace {
+			if err := a.openSelectedWorkspaceLayout(ctx); err != nil {
+				a.status = err.Error()
+			}
 		} else if err := a.openDetailModal(ctx); err != nil {
 			a.status = err.Error()
 		}
@@ -311,6 +393,24 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 	case tcell.KeyDelete:
 		if err := a.openDeleteConfirm(ctx); err != nil {
 			a.status = err.Error()
+		}
+	case tcell.KeyF7:
+		if a.currentKind() == domain.KindHost {
+			record := a.selectedRecord()
+			if record.ID != "" {
+				if err := a.splitFocusedWorkspacePane(ctx, domain.WorkspaceSplitHorizontal, record.ID, record.Label); err != nil {
+					a.status = err.Error()
+				}
+			}
+		}
+	case tcell.KeyF9:
+		if a.currentKind() == domain.KindHost {
+			record := a.selectedRecord()
+			if record.ID != "" {
+				if err := a.splitFocusedWorkspacePane(ctx, domain.WorkspaceSplitVertical, record.ID, record.Label); err != nil {
+					a.status = err.Error()
+				}
+			}
 		}
 	default:
 		switch ev.Rune() {
@@ -339,6 +439,12 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 		case 's':
 			if a.currentKind() == domain.KindHost {
 				if err := a.openSelectedHostSFTP(ctx); err != nil {
+					a.status = err.Error()
+				}
+			}
+		case 'S':
+			if a.currentKind() == domain.KindHost {
+				if err := a.openSelectedHostSession(ctx); err != nil {
 					a.status = err.Error()
 				}
 			}
@@ -383,7 +489,7 @@ func (a *App) handleMouse(ctx context.Context, ev *tcell.EventMouse) (bool, erro
 	}()
 
 	if pressedPrimary(buttons, prevButtons) {
-		if tab, ok := tabIndexAt(x, y, sftpTabKinds(a.tabs)); ok {
+		if tab, ok := tabIndexAt(x, y, specialTabKinds(a.tabs)); ok {
 			a.setActiveTab(tab)
 			a.cursor = 0
 			a.resetCursorBlink()
@@ -392,14 +498,10 @@ func (a *App) handleMouse(ctx context.Context, ev *tcell.EventMouse) (bool, erro
 	}
 
 	if a.inSessionTab() {
-		if pressedPrimary(buttons, prevButtons) {
-			if idx, ok := a.sessionTabIndexAt(x, y); ok {
-				a.setActiveSession(idx)
-				a.resetCursorBlink()
-				return false, nil
-			}
-		}
 		if y >= 2 {
+			if pressedPrimary(buttons, prevButtons) {
+				a.focusWorkspacePaneAt(x, y)
+			}
 			handled, err := a.handleSessionMouse(ev, prevButtons, prevX, prevY)
 			if err != nil {
 				return false, err
@@ -492,8 +594,8 @@ func (a *App) render() {
 	tabStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorWhite)
 	activeStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorDarkCyan)
 	x := 0
-	for idx, kind := range sftpTabKinds(a.tabs) {
-		label := " " + strings.ToUpper(string(kind)) + " "
+	for idx, kind := range specialTabKinds(a.tabs) {
+		label := " " + displayKindName(kind) + " "
 		style := tabStyle
 		if idx == a.activeTab {
 			style = activeStyle
@@ -502,7 +604,7 @@ func (a *App) render() {
 		x += len(label)
 	}
 	if a.inSessionTab() {
-		a.renderSessions(w, h)
+		a.renderWorkspace(w, h)
 	} else if a.inSFTPTab() {
 		a.renderSFTP(w, h)
 	} else {
@@ -535,10 +637,10 @@ func (a *App) footerText() string {
 
 func (a *App) footerPrompt() string {
 	if a.inSessionTab() {
-		if len(a.sessions) == 0 {
-			return "click tabs/select | F2 back | q/F10 quit"
+		if a.workspace == nil {
+			return "HOST Enter/F7/F9 or LAYOUT Enter | F2 back | q/F10 quit"
 		}
-		return "click tabs/sessions | r reconnect | wheel scrollback | drag select | Shift forces local mouse | Ctrl+Shift+C/V copy/paste | F2 back | F6 next | F8 close | q/F10 quit"
+		return "F5 host | F7 split right | F9 split down | F6 next | Alt+Arrows focus | Ctrl+Alt+Arrows resize | F4 save | F8 close | F11 zoom | r reconnect | wheel scrollback | q/F10 quit"
 	}
 	if a.inSFTPTab() {
 		if a.sftp == nil {
@@ -548,9 +650,11 @@ func (a *App) footerPrompt() string {
 	}
 	enterAction := "Enter detail"
 	if a.currentKind() == domain.KindHost {
-		enterAction = "Enter/double-click connect | s SFTP | [/] assign SFTP pane"
+		enterAction = "Enter workspace | F7/F9 split | s SFTP | [/] assign SFTP pane"
 	} else if a.currentKind() == domain.KindForward {
 		enterAction = "Enter/Space toggle"
+	} else if a.currentKind() == domain.KindWorkspace {
+		enterAction = "Enter open layout"
 	}
 	reloadAction := "r reload"
 	if a.currentKind() == domain.KindForward {
@@ -627,6 +731,98 @@ func (a *App) displayRecordLabel(kind domain.DocumentKind, item store.DocumentSu
 	return item.Label
 }
 
+func (a *App) renderWorkspace(w, h int) {
+	if a.workspace == nil {
+		drawText(a.screen, 0, 2, tcell.StyleDefault, "No workspace. Go to HOST and press Enter/F7/F9, or open a LAYOUT.")
+		return
+	}
+	rects := a.workspace.computeRects(0, 1, w, max(1, h-2))
+	for _, pane := range a.workspace.leaves() {
+		rect, ok := rects[pane.id]
+		if !ok {
+			continue
+		}
+		a.renderWorkspacePane(pane, rect)
+	}
+}
+
+func (a *App) renderWorkspacePane(pane *workspacePane, rect workspaceRect) {
+	if pane == nil || rect.w <= 0 || rect.h <= 0 {
+		return
+	}
+	active := a.workspace != nil && a.workspace.focused == pane.id
+	titleStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow)
+	if active {
+		titleStyle = titleStyle.Background(tcell.ColorDarkCyan).Foreground(tcell.ColorWhite)
+	}
+	fillPartialRow(a.screen, rect.x, rect.y, rect.w, titleStyle)
+	title := fmt.Sprintf(" %s [%s] ", workspacePaneLabel(pane), workspacePaneStatusLabel(pane))
+	drawText(a.screen, rect.x, rect.y, titleStyle, truncate(title, rect.w))
+	for y := rect.y; y < rect.y+rect.h; y++ {
+		if rect.w > 0 {
+			a.screen.SetContent(rect.x, y, ' ', nil, tcell.StyleDefault.Background(tcell.ColorDarkSlateGray))
+			a.screen.SetContent(rect.x+rect.w-1, y, ' ', nil, tcell.StyleDefault.Background(tcell.ColorDarkSlateGray))
+		}
+	}
+	if rect.h > 1 {
+		for x := rect.x; x < rect.x+rect.w; x++ {
+			a.screen.SetContent(x, rect.y+rect.h-1, ' ', nil, tcell.StyleDefault.Background(tcell.ColorDarkSlateGray))
+		}
+	}
+	content := workspaceContentRect(rect)
+	if pane.session == nil {
+		message := "Empty pane. Press F5 to pick a Host."
+		if pane.hostID != "" {
+			message = "Pending SSH pane. Press Enter or F5 to connect."
+		}
+		drawText(a.screen, content.x, content.y, tcell.StyleDefault.Foreground(tcell.ColorGray), truncate(message, content.w))
+		return
+	}
+	a.renderSessionInRect(pane.session, content)
+}
+
+func workspaceContentRect(rect workspaceRect) workspaceRect {
+	return workspaceRect{x: rect.x + 1, y: rect.y + 1, w: max(0, rect.w-2), h: max(0, rect.h-2)}
+}
+
+func (a *App) renderSessionInRect(session *service.EmbeddedSession, rect workspaceRect) {
+	if session == nil || session.Terminal == nil || rect.w <= 0 || rect.h <= 0 {
+		return
+	}
+	view := session.Terminal
+	view.Lock()
+	defer view.Unlock()
+	mode := view.Mode()
+	viewCols, viewRows := view.Size()
+	historyRows := accessibleScrollbackRows(view, mode)
+	offset := clampInt(a.scrollOffsetForSession(session), 0, historyRows)
+	if offset != a.scrollOffsetForSession(session) {
+		a.scrollOffsets[session] = offset
+	}
+	maxCols := min(rect.w, viewCols)
+	maxRows := min(rect.h, viewRows)
+	startRow := historyRows - offset
+	for y := 0; y < maxRows; y++ {
+		bufferRow := startRow + y
+		for x := 0; x < maxCols; x++ {
+			cell := cellAt(view, historyRows, x, bufferRow)
+			style := tcell.StyleDefault.Foreground(vtColor(cell.FG)).Background(vtColor(cell.BG))
+			if a.selection.Session == session && a.selection.contains(viewCols, x, bufferRow) {
+				style = style.Reverse(true)
+			}
+			ch := cell.Char
+			if ch == 0 {
+				continue
+			}
+			a.screen.SetContent(rect.x+x, rect.y+y, ch, nil, style)
+		}
+	}
+	style := view.CursorStyle()
+	if a.workspace != nil && a.workspace.focusedPane() != nil && a.workspace.focusedPane().session == session && offset == 0 && (!style.Blink || a.cursorBlinkOn) {
+		a.renderSessionCursorAt(view, rect.x, rect.y, rect.w, maxRows)
+	}
+}
+
 func (a *App) renderSessions(w, h int) {
 	if len(a.sessions) == 0 {
 		drawText(a.screen, 0, 2, tcell.StyleDefault, "No active sessions. Go to HOST and press Enter.")
@@ -673,7 +869,7 @@ func (a *App) renderSessions(w, h int) {
 	}
 	style := view.CursorStyle()
 	if offset == 0 && (!style.Blink || a.cursorBlinkOn) {
-		a.renderSessionCursor(view, w, maxRows)
+		a.renderSessionCursorAt(view, 0, 2, w, maxRows)
 	}
 }
 
@@ -683,6 +879,10 @@ func (a *App) resetCursorBlink() {
 }
 
 func (a *App) renderSessionCursor(view termemu.Terminal, width, maxRows int) {
+	a.renderSessionCursorAt(view, 0, 2, width, maxRows)
+}
+
+func (a *App) renderSessionCursorAt(view termemu.Terminal, originX, originY, width, maxRows int) {
 	if !view.CursorVisible() {
 		return
 	}
@@ -709,10 +909,14 @@ func (a *App) renderSessionCursor(view termemu.Terminal, width, maxRows int) {
 	default:
 		style = style.Reverse(true)
 	}
-	a.screen.SetContent(cursor.X, cursor.Y+2, ch, nil, style)
+	a.screen.SetContent(originX+cursor.X, originY+cursor.Y, ch, nil, style)
 }
 
 func (a *App) collectSessionUpdates() {
+	if a.workspace != nil {
+		a.collectWorkspaceUpdates()
+		return
+	}
 	previous := a.currentSession()
 	next := a.sessions[:0]
 	for _, session := range a.sessions {
@@ -730,6 +934,75 @@ func (a *App) collectSessionUpdates() {
 		a.activeSession = len(a.sessions) - 1
 	}
 	a.transitionSessionFocus(previous, a.currentSession())
+}
+
+func (a *App) collectWorkspaceUpdates() {
+	if a.workspace == nil {
+		return
+	}
+	previous := a.currentSession()
+	for _, pane := range a.workspace.leaves() {
+		session := pane.session
+		if session == nil {
+			continue
+		}
+		if pane.runtime != nil && (pane.runtime.status == sessionStatusDisconnected || pane.runtime.status == sessionStatusFinished) {
+			continue
+		}
+		select {
+		case err := <-session.Done():
+			a.handleWorkspaceSessionDone(pane, err)
+		default:
+		}
+	}
+	a.workspace.rebuildSessionIndex()
+	a.transitionSessionFocus(previous, a.currentSession())
+}
+
+func (a *App) handleWorkspaceSessionDone(pane *workspacePane, err error) {
+	if pane == nil || pane.session == nil {
+		return
+	}
+	session := pane.session
+	runtime := a.sessionRuntime(session)
+	if pane.runtime != nil && pane.runtime != runtime {
+		if runtime.hostID == "" {
+			runtime.hostID = pane.runtime.hostID
+		}
+		if runtime.label == "" {
+			runtime.label = pane.runtime.label
+		}
+		runtime.closing = runtime.closing || pane.runtime.closing
+		runtime.prompted = runtime.prompted || pane.runtime.prompted
+	}
+	pane.runtime = runtime
+	_ = session.Close()
+	if runtime.closing {
+		a.removeWorkspaceSession(pane)
+		return
+	}
+	if sessionEndedNormally(err) {
+		runtime.status = sessionStatusFinished
+		runtime.reason = ""
+		a.status = fmt.Sprintf("Session %q ended.", session.Name)
+		pane.status = workspacePaneFinished
+		pane.session = nil
+		a.removeSessionRuntime(session)
+		delete(a.scrollOffsets, session)
+		if a.selection.Session == session {
+			a.clearSelection()
+		}
+		return
+	}
+	runtime.status = sessionStatusDisconnected
+	runtime.reason = err.Error()
+	runtime.attempts = 0
+	pane.status = workspacePaneDisconnected
+	a.status = fmt.Sprintf("Session %q disconnected: %s", runtime.label, runtime.reason)
+	if !runtime.prompted {
+		runtime.prompted = true
+		a.openWorkspaceReconnectConfirm(pane, runtime.reason)
+	}
 }
 
 func (a *App) handleSessionDone(session *service.EmbeddedSession, err error) bool {
@@ -781,15 +1054,20 @@ func (a *App) collectForwardUpdates() {
 
 func (a *App) currentKind() domain.DocumentKind {
 	if a.inSessionTab() {
-		return domain.DocumentKind("sessions")
+		return workspaceTabKind
 	}
 	if a.inSFTPTab() {
-		return domain.DocumentKind("sftp")
+		return sftpTabKind
 	}
 	return a.tabs[a.activeTab]
 }
 
 func (a *App) currentSession() *service.EmbeddedSession {
+	if a.workspace != nil && a.inSessionTab() {
+		if pane := a.workspace.focusedPane(); pane != nil {
+			return pane.session
+		}
+	}
 	if !a.inSessionTab() || a.activeSession < 0 || a.activeSession >= len(a.sessions) {
 		return nil
 	}
@@ -817,9 +1095,95 @@ func (a *App) openSelectedHostSession(ctx context.Context) error {
 	if record.ID == "" {
 		return nil
 	}
-	w, h := a.screen.Size()
-	session, err := a.connector.OpenEmbeddedSession(ctx, record.ID, a.sessionPrompts(ctx), w, max(1, h-3))
+	return a.openHostInWorkspace(ctx, record.ID, record.Label, domain.WorkspaceSplitHorizontal)
+}
+
+func (a *App) openHostInWorkspace(ctx context.Context, hostID, label string, axis domain.WorkspaceSplitAxis) error {
+	if strings.TrimSpace(hostID) == "" {
+		return nil
+	}
+	a.ensureWorkspace()
+	pane := a.workspace.focusedPane()
+	if pane == nil {
+		pane = newWorkspacePane(hostID, label)
+		a.workspace.root = &workspaceNode{id: pane.id, pane: pane}
+		a.workspace.focused = pane.id
+	} else if pane.session == nil && pane.hostID == "" {
+		pane.hostID = hostID
+		pane.label = firstNonEmpty(label, hostID)
+		pane.status = workspacePanePending
+		pane.runtime = &sessionRuntime{hostID: hostID, label: pane.label, status: sessionStatusFinished}
+	} else {
+		next := newWorkspacePane(hostID, label)
+		if _, err := a.workspace.splitFocused(axis, next); err != nil {
+			return err
+		}
+		pane = next
+	}
+	if err := a.connectWorkspacePane(ctx, pane); err != nil {
+		return err
+	}
+	a.setActiveTab(len(a.tabs))
+	a.resetCursorBlink()
+	return nil
+}
+
+func (a *App) ensureWorkspace() {
+	if a.workspace == nil {
+		a.workspace = newWorkspaceState()
+	}
+	if a.workspace.bySession == nil {
+		a.workspace.rebuildSessionIndex()
+	}
+}
+
+func (a *App) splitFocusedWorkspacePane(ctx context.Context, axis domain.WorkspaceSplitAxis, hostID, label string) error {
+	a.ensureWorkspace()
+	pane := newWorkspacePane(hostID, label)
+	if _, err := a.workspace.splitFocused(axis, pane); err != nil {
+		return err
+	}
+	a.setActiveTab(len(a.tabs))
+	a.resizeWorkspaceSessions()
+	if hostID != "" {
+		return a.connectWorkspacePane(ctx, pane)
+	}
+	a.status = "Created empty workspace pane."
+	return nil
+}
+
+func (a *App) duplicateFocusedWorkspacePane(ctx context.Context) error {
+	if a.workspace == nil {
+		return nil
+	}
+	pane := a.workspace.focusedPane()
+	if pane == nil || pane.hostID == "" {
+		a.status = "Focused pane has no Host to duplicate."
+		return nil
+	}
+	return a.splitFocusedWorkspacePane(ctx, domain.WorkspaceSplitHorizontal, pane.hostID, pane.label)
+}
+
+func (a *App) connectWorkspacePane(ctx context.Context, pane *workspacePane) error {
+	if pane == nil {
+		return nil
+	}
+	a.ensureWorkspace()
+	if strings.TrimSpace(pane.hostID) == "" {
+		return a.openHostPickerForFocusedPane(ctx)
+	}
+	previous := a.currentSession()
+	rect := workspaceContentRect(a.workspacePaneRect(pane.id))
+	cols := max(1, rect.w)
+	rows := max(1, rect.h)
+	session, err := a.connector.OpenEmbeddedSession(ctx, pane.hostID, a.sessionPrompts(ctx), cols, rows)
 	if err != nil {
+		pane.status = workspacePaneDisconnected
+		if pane.runtime == nil {
+			pane.runtime = &sessionRuntime{hostID: pane.hostID, label: pane.label}
+		}
+		pane.runtime.status = sessionStatusDisconnected
+		pane.runtime.reason = err.Error()
 		return err
 	}
 	if a.clipboard != nil {
@@ -827,18 +1191,52 @@ func (a *App) openSelectedHostSession(ctx context.Context) error {
 			_ = a.clipboard.WriteText(value)
 		})
 	}
-	a.setSessionRuntime(session, &sessionRuntime{
-		hostID: record.ID,
-		label:  record.Label,
-		status: sessionStatusRunning,
-	})
-	a.sessions = append(a.sessions, session)
+	pane.session = session
+	pane.hostID = firstNonEmpty(pane.hostID, session.Resolved.HostID)
+	pane.label = firstNonEmpty(pane.label, session.Name)
+	pane.status = workspacePaneConnected
+	pane.runtime = &sessionRuntime{hostID: pane.hostID, label: pane.label, status: sessionStatusRunning}
+	a.setSessionRuntime(session, pane.runtime)
+	a.workspace.focused = pane.id
+	a.workspace.rebuildSessionIndex()
 	a.scrollToBottom(session)
+	a.transitionSessionFocus(previous, session)
 	a.status = ""
-	a.setActiveTab(len(a.tabs))
-	a.setActiveSession(len(a.sessions) - 1)
-	a.resetCursorBlink()
 	return nil
+}
+
+func (a *App) workspacePaneRect(id workspacePaneID) workspaceRect {
+	w, h := a.screenSizeOrDefault()
+	if a.workspace == nil {
+		return workspaceRect{x: 0, y: 1, w: w, h: max(1, h-2)}
+	}
+	if a.workspace.rects == nil {
+		a.workspace.computeRects(0, 1, w, max(1, h-2))
+	}
+	if rect, ok := a.workspace.rects[id]; ok {
+		return rect
+	}
+	return workspaceRect{x: 0, y: 1, w: w, h: max(1, h-2)}
+}
+
+func (a *App) openHostPickerForFocusedPane(ctx context.Context) error {
+	a.ensureWorkspace()
+	return openWorkspaceHostPicker(ctx, a, func(hostID, label string) {
+		pane := a.workspace.focusedPane()
+		if pane == nil {
+			return
+		}
+		if pane.session != nil {
+			a.status = "Focused pane is active. Split or close a pane before assigning a Host."
+			return
+		}
+		pane.hostID = hostID
+		pane.label = firstNonEmpty(label, hostID)
+		pane.status = workspacePanePending
+		pane.runtime = &sessionRuntime{hostID: hostID, label: pane.label, status: sessionStatusFinished}
+		a.setActiveTab(len(a.tabs))
+		a.status = fmt.Sprintf("Set pane to %s. Press Enter to connect.", pane.label)
+	})
 }
 
 func (a *App) toggleSelectedForward(ctx context.Context) error {
@@ -883,6 +1281,99 @@ func (a *App) toggleSelectedForward(ctx context.Context) error {
 	a.status = fmt.Sprintf("Started forward %q.", record.Label)
 	go a.watchForward(record.ID, record.Label, runCtx, runtime)
 	return nil
+}
+
+func (a *App) openSelectedWorkspaceLayout(ctx context.Context) error {
+	record := a.selectedRecord()
+	if record.ID == "" || a.currentKind() != domain.KindWorkspace {
+		return nil
+	}
+	return a.openWorkspaceLayoutByID(ctx, record.ID)
+}
+
+func (a *App) openWorkspaceLayoutByID(ctx context.Context, id string) error {
+	layout, err := a.catalog.GetWorkspace(ctx, id)
+	if err != nil {
+		return err
+	}
+	open := func() {
+		previous := a.currentSession()
+		a.closeSessionsNow()
+		a.workspace = workspaceFromDomain(layout)
+		a.status = fmt.Sprintf("Opened workspace layout %q.", layout.Name)
+		a.setActiveTab(len(a.tabs))
+		a.transitionSessionFocus(previous, a.currentSession())
+	}
+	if a.hasActiveWorkspaceSessions() {
+		a.pushModal(modalState{
+			kind: modalKindConfirm,
+			confirm: &confirmModal{
+				title: "Open Workspace",
+				lines: wrapModalLines("Close the current workspace sessions and open "+layout.Name+"?", 68),
+				onConfirm: func(context.Context, *App) error {
+					open()
+					return nil
+				},
+			},
+		})
+		return nil
+	}
+	open()
+	return nil
+}
+
+func (a *App) openWorkspacePicker(ctx context.Context) error {
+	return a.openRefPicker(ctx, "Open Workspace Layout", domain.KindWorkspace, false, func(item editorItem) {
+		if item.ID == "" {
+			return
+		}
+		if err := a.openWorkspaceLayoutByID(ctx, item.ID); err != nil {
+			a.status = err.Error()
+		}
+	})
+}
+
+func (a *App) openSaveWorkspacePrompt(ctx context.Context) {
+	if a.workspace == nil {
+		a.status = "No workspace to save."
+		return
+	}
+	defaultName := a.workspace.name
+	if defaultName == "" {
+		defaultName = "workspace"
+	}
+	a.pushModal(modalState{
+		kind: modalKindTextInput,
+		textInput: newTextInputModal("Save Workspace Layout", defaultName, false, false, func(app *App, value string) {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				app.status = "Workspace name is required."
+				return
+			}
+			workspace := app.workspace.toDomain(value)
+			if app.workspace.id != "" {
+				workspace.ID = app.workspace.id
+			} else if existing, err := app.catalog.ResolveDocument(ctx, domain.KindWorkspace, value); err == nil {
+				workspace.ID = existing.ID
+			}
+			if workspace.ID != "" {
+				if existing, err := app.catalog.GetWorkspace(ctx, workspace.ID); err == nil && existing != nil {
+					workspace.Description = existing.Description
+				}
+			}
+			if err := app.catalog.SaveWorkspace(ctx, workspace); err != nil {
+				app.status = err.Error()
+				return
+			}
+			app.workspace.id = workspace.ID
+			app.workspace.name = workspace.Name
+			if err := app.reload(ctx); err != nil {
+				app.status = err.Error()
+				return
+			}
+			app.status = fmt.Sprintf("Saved workspace layout %q.", workspace.Name)
+		}),
+	})
 }
 
 func (a *App) reconnectSelectedForward(ctx context.Context) bool {
@@ -965,6 +1456,17 @@ func (a *App) sessionTabLabel(session *service.EmbeddedSession) string {
 }
 
 func (a *App) reconnectCurrentSession(ctx context.Context) bool {
+	if a.workspace != nil {
+		pane := a.workspace.focusedPane()
+		if pane == nil || pane.runtime == nil {
+			return false
+		}
+		if pane.runtime.status != sessionStatusDisconnected && pane.runtime.status != sessionStatusFinished && pane.status != workspacePanePending {
+			return false
+		}
+		a.reconnectWorkspacePane(ctx, pane)
+		return true
+	}
 	session := a.currentSession()
 	if session == nil {
 		return false
@@ -975,6 +1477,104 @@ func (a *App) reconnectCurrentSession(ctx context.Context) bool {
 	}
 	a.reconnectSession(ctx, session)
 	return true
+}
+
+func (a *App) openWorkspaceReconnectConfirm(pane *workspacePane, reason string) {
+	if pane == nil {
+		return
+	}
+	runtime := pane.runtime
+	if runtime == nil {
+		runtime = &sessionRuntime{hostID: pane.hostID, label: pane.label}
+		pane.runtime = runtime
+	}
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Reconnect Session",
+			lines: wrapModalLines(fmt.Sprintf("Session %s disconnected: %s\n\nReconnect now?", runtime.label, reason), 68),
+			onConfirm: func(ctx context.Context, app *App) error {
+				app.reconnectWorkspacePane(ctx, pane)
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) reconnectWorkspacePane(ctx context.Context, pane *workspacePane) {
+	if pane == nil {
+		return
+	}
+	runtime := pane.runtime
+	if runtime == nil {
+		runtime = &sessionRuntime{hostID: pane.hostID, label: pane.label}
+		pane.runtime = runtime
+	}
+	if runtime.hostID == "" {
+		runtime.hostID = pane.hostID
+	}
+	if runtime.hostID == "" {
+		runtime.status = sessionStatusDisconnected
+		runtime.reason = "missing host id for reconnect"
+		a.status = runtime.reason
+		return
+	}
+	runtime.prompted = false
+	var reusableTerminal termemu.Terminal
+	var oldSession *service.EmbeddedSession
+	if pane.session != nil {
+		oldSession = pane.session
+		reusableTerminal = pane.session.Terminal
+	}
+	oldOffset := a.scrollOffsetForSession(oldSession)
+	for attempt := 1; attempt <= service.MaxForwardReconnectAttempts; attempt++ {
+		runtime.status = sessionStatusReconnecting
+		runtime.attempts = attempt
+		pane.status = workspacePaneReconnecting
+		a.status = fmt.Sprintf("Reconnecting session %q %d/%d...", runtime.label, attempt, service.MaxForwardReconnectAttempts)
+		if attempt > 1 && !sleepContext(ctx, service.ForwardReconnectDelay(attempt-1)) {
+			return
+		}
+		rect := workspaceContentRect(a.workspacePaneRect(pane.id))
+		next, err := a.connector.OpenEmbeddedSessionWithOptions(ctx, runtime.hostID, a.sessionPrompts(ctx), max(1, rect.w), max(1, rect.h), service.EmbeddedSessionOptions{
+			Terminal: reusableTerminal,
+		})
+		if err != nil {
+			runtime.reason = err.Error()
+			continue
+		}
+		if a.clipboard != nil {
+			next.SetClipboardHandler(func(value string) {
+				_ = a.clipboard.WriteText(value)
+			})
+		}
+		if oldSession != nil {
+			a.removeSessionRuntime(oldSession)
+			delete(a.scrollOffsets, oldSession)
+		}
+		pane.session = next
+		pane.hostID = runtime.hostID
+		pane.label = firstNonEmpty(runtime.label, next.Name)
+		pane.status = workspacePaneConnected
+		pane.runtime = &sessionRuntime{hostID: runtime.hostID, label: pane.label, status: sessionStatusRunning}
+		a.setSessionRuntime(next, pane.runtime)
+		if oldOffset > 0 {
+			a.setScrollOffset(next, oldOffset, next.Terminal.ScrollbackRows())
+		}
+		if a.selection.Session == oldSession {
+			a.clearSelection()
+		}
+		a.workspace.rebuildSessionIndex()
+		a.status = fmt.Sprintf("Reconnected session %q.", pane.label)
+		a.transitionSessionFocus(oldSession, a.currentSession())
+		return
+	}
+	runtime.status = sessionStatusDisconnected
+	runtime.attempts = service.MaxForwardReconnectAttempts
+	pane.status = workspacePaneDisconnected
+	a.status = fmt.Sprintf("Session %q reconnect failed: %s", runtime.label, runtime.reason)
+	runtime.prompted = true
+	a.openWorkspaceReconnectConfirm(pane, runtime.reason)
 }
 
 func (a *App) openSessionReconnectConfirm(session *service.EmbeddedSession, reason string) {
@@ -1066,6 +1666,26 @@ func (a *App) closeRunningForwards() {
 }
 
 func (a *App) closeSessionsNow() {
+	if a.workspace != nil {
+		for _, pane := range a.workspace.leaves() {
+			if pane.session == nil {
+				continue
+			}
+			if pane.runtime != nil {
+				pane.runtime.closing = true
+			}
+			_ = pane.session.Close()
+			a.removeSessionRuntime(pane.session)
+			delete(a.scrollOffsets, pane.session)
+			pane.session = nil
+			if pane.hostID != "" {
+				pane.status = workspacePanePending
+			} else {
+				pane.status = workspacePaneEmpty
+			}
+		}
+		a.workspace.rebuildSessionIndex()
+	}
 	for _, session := range a.sessions {
 		if runtime := a.sessionRuntime(session); runtime != nil {
 			runtime.closing = true
@@ -1100,6 +1720,10 @@ func (a *App) requestQuit() {
 }
 
 func (a *App) requestCloseSession(index int) {
+	if a.workspace != nil {
+		a.requestCloseFocusedWorkspacePane()
+		return
+	}
 	if a.hasModal() {
 		return
 	}
@@ -1121,6 +1745,82 @@ func (a *App) requestCloseSession(index int) {
 			},
 		},
 	})
+}
+
+func (a *App) requestCloseFocusedWorkspacePane() {
+	if a.hasModal() || a.workspace == nil {
+		return
+	}
+	pane := a.workspace.focusedPane()
+	if pane == nil {
+		return
+	}
+	confirm := pane.session != nil
+	if !confirm {
+		a.closeWorkspacePane(pane.id)
+		return
+	}
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Close Pane",
+			lines: wrapModalLines(fmt.Sprintf("Close pane %s?", workspacePaneLabel(pane)), 68),
+			onConfirm: func(context.Context, *App) error {
+				a.closeWorkspacePane(pane.id)
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) closeWorkspacePane(id workspacePaneID) {
+	if a.workspace == nil {
+		return
+	}
+	previous := a.currentSession()
+	pane := a.workspace.closePane(id)
+	if pane != nil {
+		a.removeWorkspaceSession(pane)
+	}
+	if a.workspace != nil && len(a.workspace.leaves()) == 1 {
+		only := a.workspace.leaves()[0]
+		if only.session == nil && only.hostID == "" && a.inSessionTab() {
+			a.workspace = nil
+			a.setActiveTab(0)
+			a.transitionSessionFocus(previous, nil)
+			return
+		}
+	}
+	a.resizeWorkspaceSessions()
+	a.transitionSessionFocus(previous, a.currentSession())
+}
+
+func (a *App) removeWorkspaceSession(pane *workspacePane) {
+	if pane == nil || pane.session == nil {
+		return
+	}
+	session := pane.session
+	if pane.runtime != nil {
+		pane.runtime.closing = true
+	}
+	_ = session.Close()
+	a.removeSessionRuntime(session)
+	delete(a.scrollOffsets, session)
+	if a.selection.Session == session {
+		a.clearSelection()
+	}
+	pane.session = nil
+	if pane.hostID != "" {
+		pane.status = workspacePanePending
+		if pane.runtime != nil {
+			pane.runtime.status = sessionStatusFinished
+		}
+	} else {
+		pane.status = workspacePaneEmpty
+	}
+	if a.workspace != nil {
+		a.workspace.rebuildSessionIndex()
+	}
 }
 
 func (a *App) requestStopForward(id, label string) {
@@ -1160,6 +1860,9 @@ func (a *App) stopForward(id, label string) {
 }
 
 func (a *App) hasActiveSSHResource() bool {
+	if a.hasActiveWorkspaceSessions() {
+		return true
+	}
 	if len(a.sessions) > 0 {
 		return true
 	}
@@ -1169,6 +1872,21 @@ func (a *App) hasActiveSSHResource() bool {
 		}
 	}
 	return a.hasRemoteSFTPPane()
+}
+
+func (a *App) hasActiveWorkspaceSessions() bool {
+	if a.workspace == nil {
+		return false
+	}
+	for _, pane := range a.workspace.leaves() {
+		if pane.session != nil {
+			return true
+		}
+		if pane.runtime != nil && (pane.runtime.status == sessionStatusDisconnected || pane.runtime.status == sessionStatusReconnecting) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) watchForward(id, label string, ctx context.Context, runtime *forwardRuntime) {
@@ -1270,14 +1988,14 @@ func sleepContext(ctx context.Context, delay time.Duration) bool {
 }
 
 func (a *App) forwardSessionKey(ev *tcell.EventKey) error {
-	if a.activeSession >= len(a.sessions) {
+	session := a.currentSession()
+	if session == nil {
 		return nil
 	}
 	payload := sessionKeyBytes(ev)
 	if len(payload) == 0 {
 		return nil
 	}
-	session := a.sessions[a.activeSession]
 	runtime := a.sessionRuntime(session)
 	if runtime.status == sessionStatusDisconnected || runtime.status == sessionStatusReconnecting || runtime.status == sessionStatusFinished {
 		a.status = "Session is not connected. Press r to reconnect or F8 to close."
@@ -1293,6 +2011,18 @@ func (a *App) handleSessionMouse(ev *tcell.EventMouse, prevButtons tcell.ButtonM
 		return false, nil
 	}
 	x, y := ev.Position()
+	offsetX, offsetY := 0, 2
+	if a.workspace != nil {
+		pane := a.workspace.focusedPane()
+		if pane == nil {
+			return false, nil
+		}
+		rect := workspaceContentRect(a.workspacePaneRect(pane.id))
+		if x < rect.x || x >= rect.x+rect.w || y < rect.y || y >= rect.y+rect.h {
+			return false, nil
+		}
+		offsetX, offsetY = rect.x, rect.y
+	}
 	view := session.Terminal
 	view.Lock()
 	mode := view.Mode()
@@ -1315,7 +2045,7 @@ func (a *App) handleSessionMouse(ev *tcell.EventMouse, prevButtons tcell.ButtonM
 	}
 
 	if a.shouldUseLocalSelection(ev, mode, prevButtons) {
-		return a.handleLocalSelectionMouse(session, ev, prevButtons, x, y-2, cols, rows, historyRows), nil
+		return a.handleLocalSelectionMouse(session, ev, prevButtons, x-offsetX, y-offsetY, cols, rows, historyRows), nil
 	}
 
 	if mode&termemu.ModeMouseMask == 0 {
@@ -1325,7 +2055,7 @@ func (a *App) handleSessionMouse(ev *tcell.EventMouse, prevButtons tcell.ButtonM
 	if a.selection.Active && a.selection.Session == session {
 		a.clearSelection()
 	}
-	payload := sessionMouseBytes(ev, prevButtons, prevX, prevY, x, y-2, mode)
+	payload := sessionMouseBytes(ev, prevButtons, prevX-offsetX, prevY-offsetY, x-offsetX, y-offsetY, mode)
 	if len(payload) == 0 {
 		return false, nil
 	}
@@ -2000,6 +2730,64 @@ func (a *App) adjustScrollOffset(session *service.EmbeddedSession, delta int, ma
 	a.setScrollOffset(session, a.scrollOffsetForSession(session)+delta, maxOffset)
 }
 
+func (a *App) focusNextWorkspacePane() {
+	if a.workspace == nil {
+		return
+	}
+	previous := a.currentSession()
+	a.workspace.focusNext()
+	a.transitionSessionFocus(previous, a.currentSession())
+}
+
+func (a *App) focusWorkspacePaneAt(x, y int) {
+	if a.workspace == nil {
+		return
+	}
+	previous := a.currentSession()
+	if a.workspace.focusPaneAt(x, y) {
+		a.transitionSessionFocus(previous, a.currentSession())
+	}
+}
+
+func (a *App) focusWorkspaceDirection(dx, dy int) {
+	if a.workspace == nil {
+		return
+	}
+	previous := a.currentSession()
+	if a.workspace.focusDirection(dx, dy) {
+		a.transitionSessionFocus(previous, a.currentSession())
+	}
+}
+
+func (a *App) resizeFocusedWorkspacePane(dx, dy int) {
+	if a.workspace == nil {
+		return
+	}
+	w, h := a.screenSizeOrDefault()
+	if a.workspace.resizeFocused(dx, dy, w, max(1, h-2)) {
+		a.resizeWorkspaceSessions()
+	}
+}
+
+func (a *App) resizeWorkspaceSessions() {
+	if a.workspace == nil {
+		if a.inSessionTab() && a.activeSession < len(a.sessions) {
+			w, h := a.screenSizeOrDefault()
+			_ = a.sessions[a.activeSession].Resize(w, max(1, h-3))
+		}
+		return
+	}
+	w, h := a.screenSizeOrDefault()
+	rects := a.workspace.computeRects(0, 1, w, max(1, h-2))
+	for _, pane := range a.workspace.leaves() {
+		if pane.session == nil {
+			continue
+		}
+		rect := workspaceContentRect(rects[pane.id])
+		_ = pane.session.Resize(max(1, rect.w), max(1, rect.h))
+	}
+}
+
 func (a *App) setActiveTab(index int) {
 	if index < 0 || index > a.sftpTabIndex() {
 		return
@@ -2250,10 +3038,7 @@ func (a *App) handlePromptEvent(ctx context.Context, ev tcell.Event) error {
 	switch event := ev.(type) {
 	case *tcell.EventResize:
 		a.screen.Sync()
-		if a.inSessionTab() && a.activeSession < len(a.sessions) {
-			w, h := a.screen.Size()
-			_ = a.sessions[a.activeSession].Resize(w, max(1, h-3))
-		}
+		a.resizeWorkspaceSessions()
 	case *tcell.EventFocus:
 		a.setFocused(event.Focused)
 	case *tcell.EventKey:

@@ -513,6 +513,8 @@ func (a *App) buildFormModal(ctx context.Context, kind domain.DocumentKind, id s
 		return a.buildKeyForm(ctx, id, isNew)
 	case domain.KindForward:
 		return a.buildForwardForm(ctx, id, isNew)
+	case domain.KindWorkspace:
+		return a.buildWorkspaceForm(ctx, id, isNew)
 	case domain.KindKnownHost:
 		return a.buildKnownHostForm(ctx, id, isNew)
 	default:
@@ -811,6 +813,44 @@ func (a *App) buildForwardForm(ctx context.Context, id string, isNew bool) (*for
 	return form, nil
 }
 
+func (a *App) buildWorkspaceForm(ctx context.Context, id string, isNew bool) (*formModal, error) {
+	workspace := &domain.Workspace{}
+	if !isNew {
+		var err error
+		workspace, err = a.catalog.GetWorkspace(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+	}
+	form := &formModal{
+		title: "Edit LAYOUT",
+		kind:  domain.KindWorkspace,
+		id:    workspace.ID,
+		isNew: isNew,
+		fields: []*formField{
+			{key: "name", label: "Name", kind: fieldKindText, required: true, value: workspace.Name},
+			{key: "description", label: "Description", kind: fieldKindTextArea, value: workspace.Description},
+		},
+	}
+	form.onSave = func(ctx context.Context, app *App, form *formModal) error {
+		root := workspace.Root
+		if root == nil {
+			root = newWorkspaceState().toDomain("tmp").Root
+		}
+		next := domain.Workspace{
+			ID:          form.id,
+			Name:        strings.TrimSpace(formValue(form, "name")),
+			Description: formValue(form, "description"),
+			Root:        root,
+		}
+		if err := app.catalog.SaveWorkspace(ctx, &next); err != nil {
+			return err
+		}
+		return app.completeFormSave(ctx, form, next.ID, next.Label())
+	}
+	return form, nil
+}
+
 func (a *App) buildKnownHostForm(ctx context.Context, id string, isNew bool) (*formModal, error) {
 	entry := &domain.KnownHost{Source: string(domain.KnownHostsBackendVault)}
 	if !isNew {
@@ -973,6 +1013,18 @@ func (a *App) forwardRuntimeDetailLines(id string, forward *domain.Forward) []st
 }
 
 func (a *App) openHostSessionByID(ctx context.Context, id string) error {
+	if id == "" {
+		return nil
+	}
+	if a.catalog != nil {
+		if rec, err := a.catalog.ResolveDocument(ctx, domain.KindHost, id); err == nil {
+			return a.openHostInWorkspace(ctx, rec.ID, rec.Label, domain.WorkspaceSplitHorizontal)
+		}
+	}
+	return a.openHostInWorkspace(ctx, id, id, domain.WorkspaceSplitHorizontal)
+}
+
+func (a *App) openLegacyHostSessionByID(ctx context.Context, id string) error {
 	if id == "" {
 		return nil
 	}

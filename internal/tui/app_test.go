@@ -239,8 +239,8 @@ func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 		tabs:      []domain.DocumentKind{domain.KindHost, domain.KindIdentity},
 		activeTab: 0,
 	}
-	if got := app.footerText(); !strings.Contains(got, "Enter/double-click connect") {
-		t.Fatalf("host footer = %q, want connect prompt", got)
+	if got := app.footerText(); !strings.Contains(got, "Enter workspace") {
+		t.Fatalf("host footer = %q, want workspace prompt", got)
 	}
 
 	app.setActiveTab(1)
@@ -248,17 +248,57 @@ func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 		t.Fatalf("identity footer = %q, want detail prompt", got)
 	}
 
-	app.sessions = []*service.EmbeddedSession{{Name: "test", Terminal: termemu.New(4, 2)}}
+	app.workspace = newWorkspaceState()
 	app.setActiveTab(len(app.tabs))
-	if got := app.footerText(); !strings.Contains(got, "wheel scrollback") || !strings.Contains(got, "r reconnect") {
-		t.Fatalf("session footer = %q, want session prompt", got)
+	if got := app.footerText(); !strings.Contains(got, "split right") || !strings.Contains(got, "r reconnect") {
+		t.Fatalf("workspace footer = %q, want workspace prompt", got)
 	}
 
 	app.status = "Connecting: dialing test"
 	app.setActiveTab(0)
 	got := app.footerText()
-	if !strings.Contains(got, "Connecting: dialing test") || !strings.Contains(got, "Enter/double-click connect") {
+	if !strings.Contains(got, "Connecting: dialing test") || !strings.Contains(got, "Enter workspace") {
 		t.Fatalf("status footer = %q, want status plus refreshed host prompt", got)
+	}
+}
+
+func TestWorkspaceSplitAndClose(t *testing.T) {
+	workspace := newWorkspaceState()
+	first := workspace.focused
+	second, err := workspace.splitFocused(domain.WorkspaceSplitHorizontal, newWorkspacePane("host-2", "two"))
+	if err != nil {
+		t.Fatalf("splitFocused returned error: %v", err)
+	}
+	if len(workspace.leaves()) != 2 {
+		t.Fatalf("leaf count = %d, want 2", len(workspace.leaves()))
+	}
+	if workspace.focused != second.id {
+		t.Fatalf("focused pane = %s, want new pane %s", workspace.focused, second.id)
+	}
+	closed := workspace.closePane(second.id)
+	if closed == nil || closed.id != second.id {
+		t.Fatalf("closed pane = %#v, want %s", closed, second.id)
+	}
+	if len(workspace.leaves()) != 1 || workspace.focused != first {
+		t.Fatalf("workspace leaves/focus after close = %d/%s, want 1/%s", len(workspace.leaves()), workspace.focused, first)
+	}
+}
+
+func TestWorkspaceDomainRoundTripPreservesHostRefs(t *testing.T) {
+	workspace := newWorkspaceState()
+	if _, err := workspace.splitFocused(domain.WorkspaceSplitVertical, newWorkspacePane("host-1", "prod")); err != nil {
+		t.Fatalf("splitFocused returned error: %v", err)
+	}
+	layout := workspace.toDomain("ops")
+	if layout.Name != "ops" || layout.Root.Split == nil || layout.Root.Split.Second.Pane.HostRef != "host-1" {
+		t.Fatalf("layout = %#v", layout)
+	}
+	restored := workspaceFromDomain(layout)
+	if len(restored.leaves()) != 2 {
+		t.Fatalf("restored leaves = %d, want 2", len(restored.leaves()))
+	}
+	if restored.leaves()[1].hostID != "host-1" || restored.leaves()[1].status != workspacePanePending {
+		t.Fatalf("restored second pane = %#v", restored.leaves()[1])
 	}
 }
 
@@ -335,6 +375,39 @@ func TestCollectSessionUpdatesKeepsDisconnectedSessionAndPromptsReconnect(t *tes
 	}
 }
 
+func TestWorkspaceSessionDoneKeepsDisconnectedPaneSession(t *testing.T) {
+	session := &service.EmbeddedSession{Name: "one", Terminal: termemu.New(4, 2)}
+	workspace := newWorkspaceState()
+	pane := workspace.focusedPane()
+	pane.hostID = "host-1"
+	pane.label = "one"
+	pane.session = session
+	pane.status = workspacePaneConnected
+	app := &App{
+		tabs:            []domain.DocumentKind{domain.KindHost},
+		activeTab:       1,
+		workspace:       workspace,
+		sessionRuntimes: map[*service.EmbeddedSession]*sessionRuntime{},
+		scrollOffsets:   map[*service.EmbeddedSession]int{},
+	}
+	app.setSessionRuntime(session, &sessionRuntime{hostID: "host-1", label: "one", status: sessionStatusRunning})
+
+	app.handleWorkspaceSessionDone(pane, io.EOF)
+
+	if pane.session != session {
+		t.Fatal("expected disconnected workspace pane to retain its session")
+	}
+	if pane.status != workspacePaneDisconnected {
+		t.Fatalf("pane status = %s, want disconnected", pane.status)
+	}
+	if runtime := app.sessionRuntime(session); runtime.status != sessionStatusDisconnected {
+		t.Fatalf("session status = %s, want disconnected", runtime.status)
+	}
+	if !app.hasModal() {
+		t.Fatal("expected reconnect confirmation modal")
+	}
+}
+
 func TestCollectSessionUpdatesRemovesNormalExit(t *testing.T) {
 	session := &service.EmbeddedSession{Name: "one", Terminal: termemu.New(4, 2)}
 	app := &App{
@@ -365,6 +438,23 @@ func TestCloseLastSessionReturnsToFirstTab(t *testing.T) {
 	app.closeSessionAt(0)
 	if len(app.sessions) != 0 {
 		t.Fatalf("sessions len = %d, want 0", len(app.sessions))
+	}
+	if app.activeTab != 0 {
+		t.Fatalf("active tab = %d, want first tab", app.activeTab)
+	}
+}
+
+func TestCloseLastWorkspacePaneReturnsToFirstTab(t *testing.T) {
+	workspace := newWorkspaceState()
+	app := &App{
+		tabs:      []domain.DocumentKind{domain.KindHost, domain.KindIdentity},
+		activeTab: 2,
+		workspace: workspace,
+		focused:   true,
+	}
+	app.closeWorkspacePane(workspace.focused)
+	if app.workspace != nil {
+		t.Fatal("expected empty workspace to close")
 	}
 	if app.activeTab != 0 {
 		t.Fatalf("active tab = %d, want first tab", app.activeTab)

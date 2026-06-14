@@ -60,6 +60,7 @@ func newRootCommand(rt *runtime) *cobra.Command {
 		rt.newResourceCmd(domain.KindIdentity),
 		rt.newResourceCmd(domain.KindKey),
 		rt.newResourceCmd(domain.KindForward),
+		rt.newResourceCmd(domain.KindWorkspace),
 		rt.newInspectCmd(),
 		rt.newImportCmd(),
 		rt.newTermiusCmd(),
@@ -441,6 +442,15 @@ func (r *runtime) newPutCmd(kind domain.DocumentKind) *cobra.Command {
 					return err
 				}
 				if err := catalog.SaveForward(cmd.Context(), &value); err != nil {
+					return err
+				}
+				return printJSON(value)
+			case domain.KindWorkspace:
+				var value domain.Workspace
+				if err := readJSON(file, &value); err != nil {
+					return err
+				}
+				if err := catalog.SaveWorkspace(cmd.Context(), &value); err != nil {
 					return err
 				}
 				return printJSON(value)
@@ -1168,6 +1178,15 @@ func saveDocumentAndPrint(ctx context.Context, catalog *service.Catalog, kind do
 			return err
 		}
 		return printJSON(forward)
+	case domain.KindWorkspace:
+		workspace, ok := value.(domain.Workspace)
+		if !ok {
+			return errors.New("interactive workspace payload is invalid")
+		}
+		if err := catalog.SaveWorkspace(ctx, &workspace); err != nil {
+			return err
+		}
+		return printJSON(workspace)
 	default:
 		return fmt.Errorf("unsupported kind %s", kind)
 	}

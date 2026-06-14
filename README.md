@@ -7,7 +7,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
 - Local-first vault lifecycle: `vault init|keychain enable|keychain disable|keychain status|migrate|change-password`
 - Build metadata reporting with `version`
 - Self-install command: `install [--dir PATH]`
-- CRUD for `host`, `group`, `profile`, `identity`, `key`, `forward`
+- CRUD for `host`, `group`, `profile`, `identity`, `key`, `forward`, `workspace`
 - Saved host key inspection with `known-host list|delete`
 - Resolved host inspection with `inspect <host>`
 - SFTP browsing and file transfer via `sftp ls|stat|get|put|mkdir|rm|rename`
@@ -23,7 +23,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
   - saved and one-shot `-L/-R/-D` forwards
   - SSH-style debug verbosity via `-v`, `-vv`, `-vvv`
   - remote command execution via `exec <host> <command>`
-- TUI CRUD tabs for `host`, `group`, `profile`, `identity`, `key`, `forward`, `known-host`, plus embedded SSH session and SFTP tabs
+- TUI CRUD tabs for `host`, `group`, `profile`, `identity`, `key`, `forward`, `workspace` layouts, `known-host`, plus split SSH workspace and SFTP tabs
 
 ## Build
 
@@ -74,7 +74,7 @@ nermius forward start prod-db
 nermius sftp ls my-host:/var/log
 nermius sftp get my-host:/var/log/syslog .\syslog
 
-# 7. Open the TUI for browsing objects and sessions.
+# 7. Open the TUI for browsing objects, split SSH workspaces, and SFTP.
 nermius tui
 ```
 
@@ -103,21 +103,26 @@ There is no plaintext local session file anymore. On migrated/current vaults, ob
 
 Inside the TUI object tabs:
 
-- `HOST / GROUP / PROFILE / IDENTITY / KEY / FORWARD / KNOWN-HOST` all support in-screen CRUD modals
-- `Enter` connects on `HOST`, toggles the selected tunnel on `FORWARD`, and opens a read-only detail view on every other tab
+- `HOST / GROUP / PROFILE / IDENTITY / KEY / FORWARD / LAYOUT / KNOWN-HOST` all support in-screen CRUD modals
+- `Enter` opens the selected `HOST` in the split `WORKSPACE`, opens the selected `LAYOUT`, toggles the selected tunnel on `FORWARD`, and opens a read-only detail view on every other tab
 - `d` opens detail, `e` opens edit, `a` opens a create form
+- from `HOST`, `F7` adds the selected host as a split-right workspace pane and `F9` adds it as a split-down workspace pane
 - `s` opens a dual-pane SFTP browser for the selected `HOST`; `[` assigns the selected `HOST` to the left SFTP pane and `]` assigns it to the right pane
 - `Delete` or `x` opens delete confirmation; referenced objects are blocked and show who still depends on them
 - `/` opens a filter prompt for the current tab, and `r` reloads the lists
 - reference fields use searchable pickers, and ordered lists such as profiles, forwards, known-host host patterns, and identity auth methods use a dedicated list editor
 - `FORWARD` objects are reusable `-L`/`-R`/`-D` tunnel definitions with their own Host picker; `Enter` or `Space` starts/stops the selected tunnel for the lifetime of the current TUI process, `r` reconnects a disconnected forward, and the list shows `STATUS` plus a separate `REASON`
 
-Inside the TUI session view:
+Inside the TUI WORKSPACE view:
 
 - connection prompts such as unknown host-key trust, password, username, and key passphrase stay inside the TUI as modals
 - connection progress is shown in the status bar while resolving hosts, dialing, checking known hosts, authenticating, and opening the remote shell
-- closing an active session or quitting while SSH resources are open asks for confirmation to avoid accidental disconnects
-- if an embedded SSH session disconnects unexpectedly, the TUI keeps the session tab and scrollback, asks whether to reconnect, and retries up to 5 times after confirmation; press `r` on a disconnected session to try again
+- each workspace pane is an empty, pending, connected, disconnected, or reconnecting SSH terminal pane; SFTP remains a separate full-screen dual-pane tool
+- `F7` splits the focused pane to the right, `F9` splits it downward, `F6` focuses the next pane, `Alt+Arrow` moves focus by direction, `Ctrl+Alt+Arrow` resizes the nearest split, and `F11` zooms/unzooms the focused pane
+- `F5` picks a host for the focused empty pane; pressing `Enter` on a pending pane connects it
+- `F4` saves the current split tree as a named `LAYOUT`; `F3` opens a saved layout, and saved layouts restore pane shape and host refs as pending connections
+- closing an active pane or quitting while SSH resources are open asks for confirmation to avoid accidental disconnects
+- if an embedded SSH session disconnects unexpectedly, the TUI keeps the pane and scrollback, asks whether to reconnect, and retries up to 5 times after confirmation; press `r` on a disconnected pane to try again
 - use the mouse wheel to scroll local shell history
 - use `Shift+wheel` to force local scrollback when the remote app has mouse tracking enabled
 - drag to select visible terminal text, including locally scrolled shell history
@@ -414,6 +419,36 @@ Forward:
   "enabled": true
 }
 ```
+
+Workspace layout:
+
+```json
+{
+  "name": "ops",
+  "root": {
+    "split": {
+      "axis": "horizontal",
+      "ratio": 0.5,
+      "first": {
+        "pane": {
+          "type": "ssh",
+          "host_ref": "prod-host-uuid",
+          "title": "prod"
+        }
+      },
+      "second": {
+        "pane": {
+          "type": "ssh",
+          "host_ref": "db-host-uuid",
+          "title": "db"
+        }
+      }
+    }
+  }
+}
+```
+
+Saved workspace layouts restore pane shape and host references as pending SSH panes; they do not persist remote shell processes, scrollback, or SFTP state.
 
 Identity:
 

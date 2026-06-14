@@ -13,6 +13,7 @@ const (
 	KindForward   DocumentKind = "forward"
 	KindKnownHost DocumentKind = "known_host"
 	KindBackend   DocumentKind = "backend"
+	KindWorkspace DocumentKind = "workspace"
 )
 
 type KnownHostsPolicy string
@@ -66,6 +67,20 @@ type BackendType string
 
 const (
 	BackendTypeTermix BackendType = "termix"
+)
+
+type WorkspacePaneType string
+
+const (
+	WorkspacePaneEmpty WorkspacePaneType = "empty"
+	WorkspacePaneSSH   WorkspacePaneType = "ssh"
+)
+
+type WorkspaceSplitAxis string
+
+const (
+	WorkspaceSplitHorizontal WorkspaceSplitAxis = "horizontal"
+	WorkspaceSplitVertical   WorkspaceSplitAxis = "vertical"
 )
 
 type SecretKind string
@@ -191,6 +206,34 @@ type Backend struct {
 	UpdatedAt          time.Time   `json:"updated_at,omitempty"`
 }
 
+type Workspace struct {
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Root        *WorkspaceNode `json:"root,omitempty"`
+	CreatedAt   time.Time      `json:"created_at,omitempty"`
+	UpdatedAt   time.Time      `json:"updated_at,omitempty"`
+}
+
+type WorkspaceNode struct {
+	ID    string          `json:"id,omitempty"`
+	Split *WorkspaceSplit `json:"split,omitempty"`
+	Pane  *WorkspacePane  `json:"pane,omitempty"`
+}
+
+type WorkspaceSplit struct {
+	Axis   WorkspaceSplitAxis `json:"axis"`
+	Ratio  float64            `json:"ratio"`
+	First  *WorkspaceNode     `json:"first,omitempty"`
+	Second *WorkspaceNode     `json:"second,omitempty"`
+}
+
+type WorkspacePane struct {
+	Type    WorkspacePaneType `json:"type"`
+	HostRef string            `json:"host_ref,omitempty"`
+	Title   string            `json:"title,omitempty"`
+}
+
 type ExternalRef struct {
 	BackendRef string    `json:"backend_ref"`
 	Kind       string    `json:"kind"`
@@ -250,6 +293,8 @@ func (k Key) Label() string { return k.Name }
 func (f Forward) Label() string { return f.Name }
 
 func (b Backend) Label() string { return b.Name }
+
+func (w Workspace) Label() string { return w.Name }
 
 func (k KnownHost) Label() string {
 	host := "<unknown>"

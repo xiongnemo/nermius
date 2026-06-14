@@ -356,6 +356,91 @@ func TestFindReferencesIncludesBackendRelations(t *testing.T) {
 	}
 }
 
+func TestSaveWorkspaceNormalizesHostRefsAndRatio(t *testing.T) {
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	host := &domain.Host{Title: "prod", Hostname: "prod.example.com"}
+	if err := catalog.SaveHost(context.Background(), host); err != nil {
+		t.Fatalf("SaveHost failed: %v", err)
+	}
+	workspace := &domain.Workspace{
+		Name: "ops",
+		Root: &domain.WorkspaceNode{
+			Split: &domain.WorkspaceSplit{
+				Axis:  domain.WorkspaceSplitHorizontal,
+				Ratio: 0.95,
+				First: &domain.WorkspaceNode{Pane: &domain.WorkspacePane{
+					Type:    domain.WorkspacePaneSSH,
+					HostRef: "prod",
+				}},
+				Second: &domain.WorkspaceNode{Pane: &domain.WorkspacePane{Type: domain.WorkspacePaneEmpty}},
+			},
+		},
+	}
+	if err := catalog.SaveWorkspace(context.Background(), workspace); err != nil {
+		t.Fatalf("SaveWorkspace failed: %v", err)
+	}
+	if workspace.Root.Split.Ratio != 0.8 {
+		t.Fatalf("ratio = %v, want clamped 0.8", workspace.Root.Split.Ratio)
+	}
+	if workspace.Root.Split.First.Pane.HostRef != host.ID {
+		t.Fatalf("host_ref = %q, want %q", workspace.Root.Split.First.Pane.HostRef, host.ID)
+	}
+
+	stored, err := catalog.GetWorkspace(context.Background(), workspace.ID)
+	if err != nil {
+		t.Fatalf("GetWorkspace failed: %v", err)
+	}
+	if stored.Name != "ops" || stored.Root.Split.First.Pane.HostRef != host.ID {
+		t.Fatalf("stored workspace = %#v", stored)
+	}
+}
+
+func TestSaveWorkspaceRejectsInvalidHostRef(t *testing.T) {
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	workspace := &domain.Workspace{
+		Name: "broken",
+		Root: &domain.WorkspaceNode{Pane: &domain.WorkspacePane{
+			Type:    domain.WorkspacePaneSSH,
+			HostRef: "missing-host",
+		}},
+	}
+	if err := catalog.SaveWorkspace(context.Background(), workspace); err == nil {
+		t.Fatal("expected invalid host_ref to be rejected")
+	}
+}
+
+func TestFindReferencesIncludesWorkspaceHostRefs(t *testing.T) {
+	catalog, cleanup := newTestCatalog(t)
+	defer cleanup()
+
+	host := &domain.Host{Title: "prod", Hostname: "prod.example.com"}
+	if err := catalog.SaveHost(context.Background(), host); err != nil {
+		t.Fatalf("SaveHost failed: %v", err)
+	}
+	workspace := &domain.Workspace{
+		Name: "ops",
+		Root: &domain.WorkspaceNode{Pane: &domain.WorkspacePane{
+			Type:    domain.WorkspacePaneSSH,
+			HostRef: host.ID,
+		}},
+	}
+	if err := catalog.SaveWorkspace(context.Background(), workspace); err != nil {
+		t.Fatalf("SaveWorkspace failed: %v", err)
+	}
+
+	refs, err := catalog.FindReferences(context.Background(), host.ID)
+	if err != nil {
+		t.Fatalf("FindReferences failed: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Kind != domain.KindWorkspace || refs[0].Field != "root.pane.host_ref" {
+		t.Fatalf("unexpected workspace refs: %#v", refs)
+	}
+}
+
 const testPrivateKeyPEM = `-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAlwAAAAdzc2gtcn
 NhAAAAAwEAAQAAAIEAwkwZ/Cfi+yF25vA5xXLN2FyaGWXQAgMUeTApSK5bii2iG3Z2fL9+

@@ -296,7 +296,7 @@ func (a *App) openDeleteConfirm(ctx context.Context) error {
 		confirm: &confirmModal{
 			title: "Confirm delete",
 			lines: []string{
-				fmt.Sprintf("Delete %s %q?", strings.ToUpper(string(kind)), label),
+				fmt.Sprintf("Delete %s %q?", displayKindName(kind), label),
 				"This action cannot be undone.",
 			},
 			onConfirm: func(ctx context.Context, app *App) error {
@@ -306,7 +306,7 @@ func (a *App) openDeleteConfirm(ctx context.Context) error {
 				if err := app.reload(ctx); err != nil {
 					return err
 				}
-				app.status = fmt.Sprintf("Deleted %s %q.", string(kind), label)
+				app.status = fmt.Sprintf("Deleted %s %q.", strings.ToLower(displayKindName(kind)), label)
 				return nil
 			},
 		},
@@ -320,17 +320,30 @@ func (a *App) openFilterModal() {
 	a.pushModal(modalState{
 		kind: modalKindTextInput,
 		textInput: newTextInputModal(
-			fmt.Sprintf("Filter %s", strings.ToUpper(string(kind))),
+			fmt.Sprintf("Filter %s", displayKindName(kind)),
 			current,
 			false,
 			false,
 			func(app *App, value string) {
 				app.filters[kind] = strings.TrimSpace(value)
 				app.cursor = 0
-				app.status = fmt.Sprintf("Filter for %s updated.", string(kind))
+				app.status = fmt.Sprintf("Filter for %s updated.", strings.ToLower(displayKindName(kind)))
 			},
 		),
 	})
+}
+
+func displayKindName(kind domain.DocumentKind) string {
+	switch kind {
+	case domain.KindWorkspace:
+		return "LAYOUT"
+	case workspaceTabKind:
+		return "WORKSPACE"
+	case sftpTabKind:
+		return "SFTP"
+	default:
+		return strings.ToUpper(string(kind))
+	}
 }
 
 func (a *App) buildDetailModal(ctx context.Context, kind domain.DocumentKind, id string) (*detailModal, error) {
@@ -339,7 +352,7 @@ func (a *App) buildDetailModal(ctx context.Context, kind domain.DocumentKind, id
 		return nil, err
 	}
 	return &detailModal{
-		title:      strings.ToUpper(string(kind)) + " detail",
+		title:      displayKindName(kind) + " detail",
 		kind:       kind,
 		id:         id,
 		lines:      lines,
@@ -412,6 +425,12 @@ func (a *App) buildDetailLines(ctx context.Context, kind domain.DocumentKind, id
 			return nil, false, err
 		}
 		return append(a.forwardRuntimeDetailLines(id, forward), lines...), canConnect, nil
+	case domain.KindWorkspace:
+		workspace, err := a.catalog.GetWorkspace(ctx, id)
+		if err != nil {
+			return nil, false, err
+		}
+		return a.genericDetailLines(ctx, kind, id, workspace)
 	case domain.KindKnownHost:
 		entry, err := service.LoadKnownHostEntry(ctx, a.catalog, a.paths.KnownHostsPath, id)
 		if err != nil {

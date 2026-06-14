@@ -155,6 +155,20 @@ func TestCompletionSuggestsHostDirectKeyFlag(t *testing.T) {
 	}
 }
 
+func TestCompletionSuggestsWorkspaceCommand(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "wor"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete wor) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("workspace")) {
+		t.Fatalf("expected completion to suggest workspace, got:\n%s", out.String())
+	}
+}
+
 func TestVaultHelpShowsKeychainAndMigrateInsteadOfUnlockLock(t *testing.T) {
 	var out bytes.Buffer
 	root := newRootCommand(&runtime{})

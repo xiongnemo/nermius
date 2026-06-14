@@ -254,6 +254,32 @@ func (c *Catalog) SaveBackend(ctx context.Context, backend *domain.Backend) erro
 	})
 }
 
+func (c *Catalog) SaveWorkspace(ctx context.Context, workspace *domain.Workspace) error {
+	if workspace == nil {
+		return errors.New("workspace is required")
+	}
+	if strings.TrimSpace(workspace.Name) == "" {
+		return errors.New("name is required")
+	}
+	if workspace.Root == nil {
+		workspace.Root = &domain.WorkspaceNode{Pane: &domain.WorkspacePane{Type: domain.WorkspacePaneEmpty}}
+	}
+	if countWorkspaceLeaves(workspace.Root) > 16 {
+		return errors.New("workspace supports at most 16 panes")
+	}
+	if err := c.normalizeWorkspaceNode(ctx, workspace.Root); err != nil {
+		return err
+	}
+	return c.withWriteKey(ctx, func(writeKey []byte) error {
+		if err := c.ensureLoaded(ctx); err != nil {
+			return err
+		}
+		return c.saveEntityWithKey(ctx, writeKey, domain.KindWorkspace, workspace.ID, workspace.Label(), workspace, func(id string) { workspace.ID = id }, func(now time.Time) {
+			touchCreatedUpdated(&workspace.CreatedAt, &workspace.UpdatedAt, now)
+		})
+	})
+}
+
 func (c *Catalog) GetHost(ctx context.Context, id string) (*domain.Host, error) {
 	var out domain.Host
 	if err := c.loadEntity(ctx, id, domain.KindHost, &out); err != nil {
@@ -313,6 +339,14 @@ func (c *Catalog) GetKnownHost(ctx context.Context, id string) (*domain.KnownHos
 func (c *Catalog) GetBackend(ctx context.Context, id string) (*domain.Backend, error) {
 	var out domain.Backend
 	if err := c.loadEntity(ctx, id, domain.KindBackend, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Catalog) GetWorkspace(ctx context.Context, id string) (*domain.Workspace, error) {
+	var out domain.Workspace
+	if err := c.loadEntity(ctx, id, domain.KindWorkspace, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -448,6 +482,16 @@ func (c *Catalog) FindReferences(ctx context.Context, targetID string) ([]Docume
 		}
 	}
 
+	workspaces, err := c.listWorkspaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, workspace := range workspaces {
+		for _, field := range workspaceHostRefFields(workspace.Root, targetID) {
+			refs = append(refs, DocumentReference{Kind: domain.KindWorkspace, ID: workspace.ID, Label: workspace.Label(), Field: field})
+		}
+	}
+
 	slices.SortFunc(refs, func(left, right DocumentReference) int {
 		if left.Kind != right.Kind {
 			return strings.Compare(string(left.Kind), string(right.Kind))
@@ -488,6 +532,10 @@ func (c *Catalog) ListKnownHosts(ctx context.Context) ([]domain.KnownHost, error
 
 func (c *Catalog) ListBackends(ctx context.Context) ([]domain.Backend, error) {
 	return c.listBackends(ctx)
+}
+
+func (c *Catalog) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	return c.listWorkspaces(ctx)
 }
 
 func (c *Catalog) LoadKindByID(ctx context.Context, id string) (store.DocumentRecord, error) {
@@ -840,6 +888,61 @@ func (c *Catalog) normalizeRoute(ctx context.Context, writeKey []byte, route *do
 	return nil
 }
 
+func (c *Catalog) normalizeWorkspaceNode(ctx context.Context, node *domain.WorkspaceNode) error {
+	if node == nil {
+		return errors.New("workspace node is required")
+	}
+	switch {
+	case node.Pane != nil && node.Split != nil:
+		return errors.New("workspace node cannot be both pane and split")
+	case node.Pane != nil:
+		pane := node.Pane
+		if pane.Type == "" {
+			pane.Type = domain.WorkspacePaneEmpty
+		}
+		switch pane.Type {
+		case domain.WorkspacePaneEmpty:
+			pane.HostRef = ""
+		case domain.WorkspacePaneSSH:
+			hostID, err := c.ResolveDocumentID(ctx, domain.KindHost, pane.HostRef)
+			if err != nil {
+				return fmt.Errorf("workspace pane host_ref: %w", err)
+			}
+			pane.HostRef = hostID
+		default:
+			return fmt.Errorf("unsupported workspace pane type %q", pane.Type)
+		}
+		return nil
+	case node.Split != nil:
+		split := node.Split
+		if split.Axis == "" {
+			split.Axis = domain.WorkspaceSplitHorizontal
+		}
+		if split.Axis != domain.WorkspaceSplitHorizontal && split.Axis != domain.WorkspaceSplitVertical {
+			return fmt.Errorf("unsupported workspace split axis %q", split.Axis)
+		}
+		if split.Ratio == 0 {
+			split.Ratio = 0.5
+		}
+		if split.Ratio < 0.2 {
+			split.Ratio = 0.2
+		}
+		if split.Ratio > 0.8 {
+			split.Ratio = 0.8
+		}
+		if err := c.normalizeWorkspaceNode(ctx, split.First); err != nil {
+			return fmt.Errorf("first: %w", err)
+		}
+		if err := c.normalizeWorkspaceNode(ctx, split.Second); err != nil {
+			return fmt.Errorf("second: %w", err)
+		}
+		return nil
+	default:
+		node.Pane = &domain.WorkspacePane{Type: domain.WorkspacePaneEmpty}
+		return nil
+	}
+}
+
 func (c *Catalog) listHosts(ctx context.Context) ([]domain.Host, error) {
 	if err := c.ensureLoaded(ctx); err != nil {
 		return nil, err
@@ -952,6 +1055,22 @@ func (c *Catalog) listBackends(ctx context.Context) ([]domain.Backend, error) {
 	return out, nil
 }
 
+func (c *Catalog) listWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	if err := c.ensureLoaded(ctx); err != nil {
+		return nil, err
+	}
+	recs := c.documentRecordsByKind(domain.KindWorkspace)
+	out := make([]domain.Workspace, 0, len(recs))
+	for _, rec := range recs {
+		var workspace domain.Workspace
+		if err := json.Unmarshal(rec.Body, &workspace); err != nil {
+			return nil, err
+		}
+		out = append(out, workspace)
+	}
+	return out, nil
+}
+
 func (c *Catalog) documentRecordsByKind(kind domain.DocumentKind) []store.DocumentRecord {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -995,6 +1114,37 @@ func (c *Catalog) findDocumentByLabel(kind domain.DocumentKind, label string) *s
 		}
 	}
 	return nil
+}
+
+func countWorkspaceLeaves(node *domain.WorkspaceNode) int {
+	if node == nil {
+		return 0
+	}
+	if node.Split != nil {
+		return countWorkspaceLeaves(node.Split.First) + countWorkspaceLeaves(node.Split.Second)
+	}
+	return 1
+}
+
+func workspaceHostRefFields(node *domain.WorkspaceNode, targetID string) []string {
+	var fields []string
+	collectWorkspaceHostRefFields(node, targetID, "root", &fields)
+	return fields
+}
+
+func collectWorkspaceHostRefFields(node *domain.WorkspaceNode, targetID, path string, fields *[]string) {
+	if node == nil {
+		return
+	}
+	if node.Pane != nil && node.Pane.Type == domain.WorkspacePaneSSH && node.Pane.HostRef == targetID {
+		*fields = append(*fields, path+".pane.host_ref")
+		return
+	}
+	if node.Split == nil {
+		return
+	}
+	collectWorkspaceHostRefFields(node.Split.First, targetID, path+".split.first", fields)
+	collectWorkspaceHostRefFields(node.Split.Second, targetID, path+".split.second", fields)
 }
 
 func (c *Catalog) putSecretWithKey(ctx context.Context, writeKey []byte, kind domain.SecretKind, existingID string, plaintext []byte) (string, error) {
@@ -1158,6 +1308,8 @@ func currentID(v any) string {
 	case *domain.KnownHost:
 		return value.ID
 	case *domain.Backend:
+		return value.ID
+	case *domain.Workspace:
 		return value.ID
 	default:
 		return ""

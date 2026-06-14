@@ -231,7 +231,7 @@ func TestSFTPLeftRightKeysNavigateTabs(t *testing.T) {
 		t.Fatalf("handleSFTPKey left = done %v err %v", done, err)
 	}
 	if !app.inSessionTab() {
-		t.Fatalf("active tab = %d, want sessions tab %d", app.activeTab, len(app.tabs))
+		t.Fatalf("active tab = %d, want workspace tab %d", app.activeTab, len(app.tabs))
 	}
 	done, err = app.handleSFTPKey(nil, tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone))
 	if done || err != nil {

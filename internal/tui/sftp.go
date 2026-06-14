@@ -1033,8 +1033,12 @@ func (a *App) inSFTPTab() bool {
 }
 
 func sftpTabKinds(tabs []domain.DocumentKind) []domain.DocumentKind {
+	return specialTabKinds(tabs)
+}
+
+func specialTabKinds(tabs []domain.DocumentKind) []domain.DocumentKind {
 	out := make([]domain.DocumentKind, 0, len(tabs)+2)
 	out = append(out, tabs...)
-	out = append(out, domain.DocumentKind("sessions"), domain.DocumentKind("sftp"))
+	out = append(out, workspaceTabKind, sftpTabKind)
 	return out
 }
