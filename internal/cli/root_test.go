@@ -188,6 +188,34 @@ func TestCompletionSuggestsVaultKeychainSubcommand(t *testing.T) {
 	}
 }
 
+func TestVaultKeychainEnableHelpIncludesRequirePresence(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"vault", "keychain", "enable", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(vault keychain enable --help) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("--require-presence")) {
+		t.Fatalf("expected help to include --require-presence, got:\n%s", out.String())
+	}
+}
+
+func TestCompletionSuggestsVaultKeychainRequirePresenceFlag(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand(&runtime{})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"__complete", "vault", "keychain", "enable", "--require-p"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(__complete vault keychain enable --require-p) returned error: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("--require-presence")) {
+		t.Fatalf("expected completion to suggest --require-presence, got:\n%s", out.String())
+	}
+}
+
 func TestForwardHelpIncludesStartSubcommand(t *testing.T) {
 	var out bytes.Buffer
 	root := newRootCommand(&runtime{})

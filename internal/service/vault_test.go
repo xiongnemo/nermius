@@ -14,7 +14,7 @@ import (
 	"github.com/nermius/nermius/internal/store"
 )
 
-func TestVaultStatusAndResolveKeychain(t *testing.T) {
+func TestVaultStatusAndResolveKeychainDoesNotRequirePresenceByDefault(t *testing.T) {
 	ctx := context.Background()
 	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
 	if err := manager.Init(ctx, "master-pass"); err != nil {
@@ -56,6 +56,9 @@ func TestVaultStatusAndResolveKeychain(t *testing.T) {
 	if !status.Initialized || !status.KeychainEnabled {
 		t.Fatalf("unexpected status: %+v", status)
 	}
+	if status.KeychainRequirePresence {
+		t.Fatalf("expected keychain presence requirement to default off: %+v", status)
+	}
 	if status.PresenceBackendKind != "fake-presence" || !status.UserPresenceCapable {
 		t.Fatalf("unexpected presence status: %+v", status)
 	}
@@ -92,8 +95,108 @@ func TestVaultStatusAndResolveKeychain(t *testing.T) {
 	if len(fakeStore.loadIntents) != 2 || fakeStore.loadIntents[0] != vaultAccessRead || fakeStore.loadIntents[1] != vaultAccessWrite {
 		t.Fatalf("unexpected load intents: %v", fakeStore.loadIntents)
 	}
+	if len(fakePresence.required) != 0 {
+		t.Fatalf("expected no presence intents by default, got %v", fakePresence.required)
+	}
+}
+
+func TestResolveKeychainRequiresPresenceWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
+	if err := manager.Init(ctx, "master-pass"); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	db, err := manager.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+	expectedKey, err := manager.unwrapVaultKey(ctx, db, "master-pass")
+	if err != nil {
+		t.Fatalf("unwrapVaultKey failed: %v", err)
+	}
+	t.Cleanup(func() { zeroBytes(expectedKey) })
+
+	vaultID, err := manager.vaultID(ctx, db)
+	if err != nil {
+		t.Fatalf("vaultID failed: %v", err)
+	}
+	fakeStore := &fakeUnlockStore{
+		available: true,
+		stored: map[string][]byte{
+			vaultID: append([]byte(nil), expectedKey...),
+		},
+		enrolled: map[string]bool{
+			vaultID: true,
+		},
+	}
+	fakePresence := &fakePresence{available: true, presence: true}
+	restore := installFakeVaultBackends(fakeStore, fakePresence)
+	defer restore()
+	if err := manager.setKeychainRequirePresence(ctx, db, true); err != nil {
+		t.Fatalf("setKeychainRequirePresence failed: %v", err)
+	}
+
+	status, err := manager.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if !status.KeychainRequirePresence {
+		t.Fatalf("expected keychain presence requirement in status: %+v", status)
+	}
+	readKey, opened, err := manager.ResolveMasterKey(ctx, func(label string) (string, error) {
+		t.Fatalf("ResolveMasterKey unexpectedly prompted for %s", label)
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveMasterKey failed: %v", err)
+	}
+	defer opened.Close()
+	defer zeroBytes(readKey)
+	writeKey, err := manager.ResolveWriteKey(ctx, opened, func(label string) (string, error) {
+		t.Fatalf("ResolveWriteKey unexpectedly prompted for %s", label)
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveWriteKey failed: %v", err)
+	}
+	defer zeroBytes(writeKey)
 	if len(fakePresence.required) != 2 || fakePresence.required[0] != vaultAccessRead || fakePresence.required[1] != vaultAccessWrite {
 		t.Fatalf("unexpected presence intents: %v", fakePresence.required)
+	}
+}
+
+func TestEnableKeychainWithOptionsStoresPresenceRequirement(t *testing.T) {
+	ctx := context.Background()
+	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
+	if err := manager.Init(ctx, "master-pass"); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	fakeStore := &fakeUnlockStore{available: true}
+	fakePresence := &fakePresence{available: true, presence: true}
+	restore := installFakeVaultBackends(fakeStore, fakePresence)
+	defer restore()
+
+	if err := manager.EnableKeychainWithOptions(ctx, "master-pass", EnableKeychainOptions{RequirePresence: true}); err != nil {
+		t.Fatalf("EnableKeychainWithOptions failed: %v", err)
+	}
+	status, err := manager.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if !status.KeychainEnabled || !status.KeychainRequirePresence {
+		t.Fatalf("unexpected keychain status after enable: %+v", status)
+	}
+
+	if err := manager.EnableKeychain(ctx, "master-pass"); err != nil {
+		t.Fatalf("EnableKeychain failed: %v", err)
+	}
+	status, err = manager.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if !status.KeychainEnabled || status.KeychainRequirePresence {
+		t.Fatalf("expected default enable to disable presence requirement: %+v", status)
 	}
 }
 

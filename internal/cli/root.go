@@ -196,6 +196,7 @@ func (r *runtime) newVaultInitCmd() *cobra.Command {
 
 func (r *runtime) newVaultKeychainCmd() *cobra.Command {
 	var password string
+	var requirePresence bool
 	cmd := &cobra.Command{
 		Use:   "keychain",
 		Short: "Manage system keychain enrollment for vault unlock material",
@@ -215,10 +216,13 @@ func (r *runtime) newVaultKeychainCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return manager.EnableKeychain(cmd.Context(), password)
+			return manager.EnableKeychainWithOptions(cmd.Context(), password, service.EnableKeychainOptions{
+				RequirePresence: requirePresence,
+			})
 		},
 	}
 	enableCmd.Flags().StringVar(&password, "password", "", "Master password")
+	enableCmd.Flags().BoolVar(&requirePresence, "require-presence", false, "Require user-presence verification before loading the enrolled keychain material")
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show keychain enrollment and vault schema status",

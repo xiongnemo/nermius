@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	metaKDF           = "vault.kdf"
-	metaWrappedKey    = "vault.wrapped_key"
-	metaVaultID       = "vault.id"
-	metaSchemaVersion = "vault.schema_version"
+	metaKDF                     = "vault.kdf"
+	metaWrappedKey              = "vault.wrapped_key"
+	metaVaultID                 = "vault.id"
+	metaSchemaVersion           = "vault.schema_version"
+	metaKeychainRequirePresence = "vault.keychain_require_presence"
 )
 
 type PasswordPrompter func(label string) (string, error)
@@ -175,12 +176,21 @@ func (m *VaultManager) Status(ctx context.Context) (VaultStatus, error) {
 		status.KeychainEnabled = enabled
 		if enabled {
 			status.UnlockMaterialSource = storeBackend.Kind()
+			requirePresence, err := m.keychainRequirePresence(ctx, db)
+			if err != nil {
+				return VaultStatus{}, err
+			}
+			status.KeychainRequirePresence = requirePresence
 		}
 	}
 	return status, nil
 }
 
 func (m *VaultManager) EnableKeychain(ctx context.Context, password string) error {
+	return m.EnableKeychainWithOptions(ctx, password, EnableKeychainOptions{})
+}
+
+func (m *VaultManager) EnableKeychainWithOptions(ctx context.Context, password string, opts EnableKeychainOptions) error {
 	db, err := m.Open(ctx)
 	if err != nil {
 		return err
@@ -206,7 +216,10 @@ func (m *VaultManager) EnableKeychain(ctx context.Context, password string) erro
 		return err
 	}
 	defer zeroBytes(vaultKey)
-	return storeBackend.Store(ctx, vaultID, vaultKey)
+	if err := storeBackend.Store(ctx, vaultID, vaultKey); err != nil {
+		return err
+	}
+	return m.setKeychainRequirePresence(ctx, db, opts.RequirePresence)
 }
 
 func (m *VaultManager) DisableKeychain(ctx context.Context) error {
@@ -401,11 +414,36 @@ func (m *VaultManager) resolveFromKeychain(ctx context.Context, db *store.Store,
 	if !enrolled {
 		return nil, errors.New("vault is not enrolled in the system keychain")
 	}
-	presence := newPresenceAuthorizer(m.Paths)
-	if err := presence.Require(ctx, vaultID, intent); err != nil {
+	requirePresence, err := m.keychainRequirePresence(ctx, db)
+	if err != nil {
 		return nil, err
 	}
+	if requirePresence {
+		presence := newPresenceAuthorizer(m.Paths)
+		if err := presence.Require(ctx, vaultID, intent); err != nil {
+			return nil, err
+		}
+	}
 	return storeBackend.Load(ctx, vaultID, intent)
+}
+
+func (m *VaultManager) keychainRequirePresence(ctx context.Context, db *store.Store) (bool, error) {
+	value, err := db.GetMeta(ctx, metaKeychainRequirePresence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return value == "true", nil
+}
+
+func (m *VaultManager) setKeychainRequirePresence(ctx context.Context, db *store.Store, enabled bool) error {
+	value := "false"
+	if enabled {
+		value = "true"
+	}
+	return db.SetMeta(ctx, metaKeychainRequirePresence, value)
 }
 
 func (m *VaultManager) schemaVersion(ctx context.Context, db *store.Store) (string, error) {

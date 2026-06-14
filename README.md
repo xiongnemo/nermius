@@ -45,6 +45,7 @@ nermius vault init
 # 2. Optionally inspect or enable system keychain enrollment.
 nermius vault keychain status
 nermius vault keychain enable
+nermius vault keychain enable --require-presence
 
 # 3. Optionally install the current binary into ~/.local/bin.
 nermius install
@@ -182,6 +183,7 @@ Useful vault commands:
 ```powershell
 nermius vault keychain status
 nermius vault keychain enable
+nermius vault keychain enable --require-presence
 nermius vault keychain disable
 nermius vault change-password
 nermius vault migrate
@@ -190,9 +192,11 @@ nermius vault migrate
 Behavior notes:
 
 - `vault keychain enable` stores the raw vault unlock material in the platform backend when supported.
+- by default, enrolled keychain unlocks do not require Windows Hello or another user-presence prompt, which keeps tests and normal commands non-interactive.
+- pass `vault keychain enable --require-presence` to require a user-presence check before the enrolled keychain material is loaded.
 - normal commands auto-try the enrolled keychain backend first, then fall back to the master password.
 - `vault keychain status` reports both the unlock-material backend and the user-presence backend.
-- on Windows, unlock material is DPAPI-protected, while read/write authorization uses Windows Hello when available, then the Windows credential prompt, then the master password fallback.
+- on Windows, unlock material is DPAPI-protected. When `--require-presence` is enabled, read/write authorization uses Windows Hello when available and falls back to the Windows credential prompt.
 - current-schema vaults use whole-vault encrypted records, so hostnames, usernames, labels, known-host payloads, and secrets are no longer stored as plaintext rows in SQLite.
 - `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault.
 
