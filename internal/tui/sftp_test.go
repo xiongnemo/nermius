@@ -242,6 +242,29 @@ func TestSFTPLeftRightKeysNavigateTabs(t *testing.T) {
 	}
 }
 
+func TestSFTPQuitConfirmsRemotePane(t *testing.T) {
+	app := &App{
+		tabs:      []domain.DocumentKind{domain.KindHost},
+		activeTab: 2,
+		sftp: &sftpBrowserState{
+			activePane: sftpPaneRight,
+			panes: [sftpPaneCount]sftpPaneState{
+				sftpPaneRight: {kind: sftpPaneRemote, hostLabel: "prod"},
+			},
+		},
+	}
+	done, err := app.handleSFTPKey(context.Background(), tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone))
+	if done || err != nil {
+		t.Fatalf("handleSFTPKey q = done %v err %v", done, err)
+	}
+	if app.exitRequested {
+		t.Fatal("expected remote SFTP pane to require quit confirmation")
+	}
+	if !app.hasModal() {
+		t.Fatal("expected quit confirmation modal")
+	}
+}
+
 func TestSFTPEmptyPaneCanBecomeLocal(t *testing.T) {
 	app := &App{
 		tabs: []domain.DocumentKind{domain.KindHost},

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -248,7 +250,7 @@ func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 
 	app.sessions = []*service.EmbeddedSession{{Name: "test", Terminal: termemu.New(4, 2)}}
 	app.setActiveTab(len(app.tabs))
-	if got := app.footerText(); !strings.Contains(got, "wheel scrollback") {
+	if got := app.footerText(); !strings.Contains(got, "wheel scrollback") || !strings.Contains(got, "r reconnect") {
 		t.Fatalf("session footer = %q, want session prompt", got)
 	}
 
@@ -269,6 +271,85 @@ func TestCopyPasteShortcuts(t *testing.T) {
 	}
 	if isCopyShortcut(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModNone)) {
 		t.Fatal("did not expect plain ctrl+c to be treated as copy")
+	}
+}
+
+func TestRequestQuitConfirmsActiveSSHResources(t *testing.T) {
+	app := &App{
+		sessions: []*service.EmbeddedSession{{Name: "one", Terminal: termemu.New(4, 2)}},
+	}
+	app.requestQuit()
+	if app.exitRequested {
+		t.Fatal("expected quit to wait for confirmation")
+	}
+	if !app.hasModal() {
+		t.Fatal("expected quit confirmation modal")
+	}
+	top := app.topModal()
+	if top == nil || top.kind != modalKindConfirm || top.confirm == nil || top.confirm.title != "Quit Nermius" {
+		t.Fatalf("top modal = %+v, want quit confirm", top)
+	}
+	if err := top.confirm.onConfirm(nil, app); err != nil {
+		t.Fatalf("confirm quit failed: %v", err)
+	}
+	if !app.exitRequested {
+		t.Fatal("expected confirmed quit to request exit")
+	}
+}
+
+func TestRequestQuitWithoutActiveResourcesExitsImmediately(t *testing.T) {
+	app := &App{}
+	app.requestQuit()
+	if !app.exitRequested {
+		t.Fatal("expected immediate exit request")
+	}
+	if app.hasModal() {
+		t.Fatal("did not expect confirmation without active resources")
+	}
+}
+
+func TestCollectSessionUpdatesKeepsDisconnectedSessionAndPromptsReconnect(t *testing.T) {
+	session := &service.EmbeddedSession{Name: "one", Terminal: termemu.New(4, 2)}
+	app := &App{
+		tabs:            []domain.DocumentKind{domain.KindHost},
+		activeTab:       1,
+		activeSession:   0,
+		sessionRuntimes: map[*service.EmbeddedSession]*sessionRuntime{},
+		scrollOffsets:   map[*service.EmbeddedSession]int{},
+		sessions:        []*service.EmbeddedSession{session},
+	}
+	app.setSessionRuntime(session, &sessionRuntime{hostID: "host-1", label: "one", status: sessionStatusRunning})
+	keep := app.handleSessionDone(session, io.EOF)
+	if !keep {
+		t.Fatal("expected disconnected session to be retained")
+	}
+	runtime := app.sessionRuntime(session)
+	if runtime.status != sessionStatusDisconnected {
+		t.Fatalf("session status = %s, want disconnected", runtime.status)
+	}
+	if !app.hasModal() {
+		t.Fatal("expected reconnect confirmation modal")
+	}
+	if got := app.sessionTabLabel(session); !strings.Contains(got, "disconnected") {
+		t.Fatalf("session tab label = %q, want disconnected status", got)
+	}
+}
+
+func TestCollectSessionUpdatesRemovesNormalExit(t *testing.T) {
+	session := &service.EmbeddedSession{Name: "one", Terminal: termemu.New(4, 2)}
+	app := &App{
+		tabs:            []domain.DocumentKind{domain.KindHost},
+		activeTab:       1,
+		sessionRuntimes: map[*service.EmbeddedSession]*sessionRuntime{},
+		scrollOffsets:   map[*service.EmbeddedSession]int{},
+		sessions:        []*service.EmbeddedSession{session},
+	}
+	keep := app.handleSessionDone(session, nil)
+	if keep {
+		t.Fatal("expected normal exit not to be retained")
+	}
+	if app.hasModal() {
+		t.Fatal("did not expect reconnect prompt on normal exit")
 	}
 }
 
@@ -311,6 +392,51 @@ func TestCloseSessionKeepsSessionsTabWhenSessionsRemain(t *testing.T) {
 	}
 	if app.activeSession != 0 {
 		t.Fatalf("active session = %d, want 0", app.activeSession)
+	}
+}
+
+func TestForwardStatusDisplayDisconnected(t *testing.T) {
+	app := &App{
+		runningForwards: map[string]*forwardRuntime{
+			"forward-disconnected": {status: forwardStatusDisconnected, reason: "network reset"},
+		},
+	}
+	status, color := app.forwardStatusDisplay("forward-disconnected")
+	if status != "disconnected" {
+		t.Fatalf("forward status = %q, want disconnected", status)
+	}
+	if color != tcell.ColorRed {
+		t.Fatalf("forward status color = %v, want red", color)
+	}
+}
+
+func TestCollectForwardUpdatesPromptsDisconnectedForward(t *testing.T) {
+	app := &App{
+		runningForwards: map[string]*forwardRuntime{
+			"forward-disconnected": {status: forwardStatusDisconnected, label: "prod-db", reason: "network reset"},
+		},
+	}
+	app.collectForwardUpdates()
+	if !app.hasModal() {
+		t.Fatal("expected reconnect confirmation modal")
+	}
+	runtime := app.runningForwards["forward-disconnected"]
+	if !runtime.prompted {
+		t.Fatal("expected disconnected forward to be marked prompted")
+	}
+	top := app.topModal()
+	if top == nil || top.kind != modalKindConfirm || top.confirm == nil || top.confirm.title != "Reconnect Forward" {
+		t.Fatalf("top modal = %+v, want reconnect forward confirm", top)
+	}
+}
+
+func TestSFTPDisconnectStatusOnlyForTransportErrors(t *testing.T) {
+	if got := sftpErrorStatus(io.EOF); !strings.Contains(got, "SFTP disconnected") {
+		t.Fatalf("transport status = %q, want disconnected", got)
+	}
+	ordinary := errors.New("permission denied")
+	if got := sftpErrorStatus(ordinary); got != ordinary.Error() {
+		t.Fatalf("ordinary status = %q, want original error", got)
 	}
 }
 

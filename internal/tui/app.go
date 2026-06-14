@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/uniseg"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/nermius/nermius/internal/clipboard"
 	"github.com/nermius/nermius/internal/config"
@@ -33,6 +37,7 @@ type App struct {
 	filters          map[domain.DocumentKind]string
 	hostAddresses    map[string]string
 	sessions         []*service.EmbeddedSession
+	sessionRuntimes  map[*service.EmbeddedSession]*sessionRuntime
 	activeSession    int
 	sftp             *sftpBrowserState
 	runningForwards  map[string]*forwardRuntime
@@ -49,6 +54,7 @@ type App struct {
 	selection        sessionSelection
 	scrollOffsets    map[*service.EmbeddedSession]int
 	modals           []modalState
+	exitRequested    bool
 }
 
 type forwardRuntimeStatus string
@@ -58,17 +64,40 @@ const (
 	forwardStatusConnecting   forwardRuntimeStatus = "connecting"
 	forwardStatusRunning      forwardRuntimeStatus = "running"
 	forwardStatusReconnecting forwardRuntimeStatus = "reconnecting"
+	forwardStatusDisconnected forwardRuntimeStatus = "disconnected"
 	forwardStatusError        forwardRuntimeStatus = "error"
 )
 
+type sessionRuntimeStatus string
+
+const (
+	sessionStatusRunning      sessionRuntimeStatus = "running"
+	sessionStatusReconnecting sessionRuntimeStatus = "reconnecting"
+	sessionStatusDisconnected sessionRuntimeStatus = "disconnected"
+	sessionStatusFinished     sessionRuntimeStatus = "finished"
+)
+
+type sessionRuntime struct {
+	hostID   string
+	label    string
+	status   sessionRuntimeStatus
+	attempts int
+	reason   string
+	closing  bool
+	prompted bool
+}
+
 type forwardRuntime struct {
 	running  *service.RunningForward
+	ctx      context.Context
 	cancel   context.CancelFunc
+	label    string
 	status   forwardRuntimeStatus
 	attempts int
 	reason   string
 	started  time.Time
 	stopping bool
+	prompted bool
 }
 
 func (rt *forwardRuntime) active() bool {
@@ -76,7 +105,7 @@ func (rt *forwardRuntime) active() bool {
 		return false
 	}
 	switch rt.status {
-	case forwardStatusConnecting, forwardStatusRunning, forwardStatusReconnecting:
+	case forwardStatusConnecting, forwardStatusRunning, forwardStatusReconnecting, forwardStatusDisconnected:
 		return true
 	default:
 		return false
@@ -112,6 +141,7 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 		records:         map[domain.DocumentKind][]store.DocumentSummary{},
 		filters:         map[domain.DocumentKind]string{},
 		hostAddresses:   map[string]string{},
+		sessionRuntimes: map[*service.EmbeddedSession]*sessionRuntime{},
 		runningForwards: map[string]*forwardRuntime{},
 		status:          "",
 		cursorBlinkOn:   true,
@@ -126,7 +156,8 @@ func Run(ctx context.Context, catalog *service.Catalog, connector *service.Conne
 		return err
 	}
 	defer app.closeRunningForwards()
-	defer app.closeSFTP()
+	defer app.closeSessionsNow()
+	defer app.closeSFTPNow()
 	return app.loop(ctx)
 }
 
@@ -154,6 +185,9 @@ func (a *App) loop(ctx context.Context) error {
 			a.collectSessionUpdates()
 			a.collectForwardUpdates()
 			a.collectSFTPUpdates(ctx)
+			if a.exitRequested {
+				return nil
+			}
 		case ev := <-events:
 			switch event := ev.(type) {
 			case *tcell.EventResize:
@@ -173,6 +207,9 @@ func (a *App) loop(ctx context.Context) error {
 				}
 				if done, err := a.handleKey(ctx, event); done {
 					return err
+				}
+				if a.exitRequested {
+					return nil
 				}
 			case *tcell.EventMouse:
 				if a.hasModal() {
@@ -202,7 +239,8 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 		}
 		switch ev.Key() {
 		case tcell.KeyF10:
-			return true, nil
+			a.requestQuit()
+			return false, nil
 		case tcell.KeyF2:
 			if len(a.tabs) > 0 {
 				a.setActiveTab(len(a.tabs) - 1)
@@ -215,7 +253,7 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			a.resetCursorBlink()
 			return false, nil
 		case tcell.KeyF8:
-			a.closeSessionAt(a.activeSession)
+			a.requestCloseSession(a.activeSession)
 			a.resetCursorBlink()
 			return false, nil
 		case tcell.KeyEscape:
@@ -226,6 +264,11 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			a.resetCursorBlink()
 			return false, a.forwardSessionKey(ev)
 		default:
+			if ev.Key() == tcell.KeyRune && ev.Rune() == 'r' {
+				if a.reconnectCurrentSession(ctx) {
+					return false, nil
+				}
+			}
 			a.resetCursorBlink()
 			return false, a.forwardSessionKey(ev)
 		}
@@ -235,7 +278,8 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 	}
 	switch ev.Key() {
 	case tcell.KeyEscape, tcell.KeyCtrlC, tcell.KeyF10:
-		return true, nil
+		a.requestQuit()
+		return false, nil
 	case tcell.KeyLeft:
 		a.moveActiveTab(-1)
 	case tcell.KeyRight:
@@ -271,7 +315,8 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 	default:
 		switch ev.Rune() {
 		case 'q':
-			return true, nil
+			a.requestQuit()
+			return false, nil
 		case 'a':
 			if err := a.openAddForm(ctx); err != nil {
 				a.status = err.Error()
@@ -285,6 +330,9 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 				a.status = err.Error()
 			}
 		case 'r':
+			if a.currentKind() == domain.KindForward && a.reconnectSelectedForward(ctx) {
+				return false, nil
+			}
 			if err := a.reload(ctx); err != nil {
 				a.status = err.Error()
 			}
@@ -345,7 +393,7 @@ func (a *App) handleMouse(ctx context.Context, ev *tcell.EventMouse) (bool, erro
 
 	if a.inSessionTab() {
 		if pressedPrimary(buttons, prevButtons) {
-			if idx, ok := sessionTabIndexAt(x, y, a.sessions); ok {
+			if idx, ok := a.sessionTabIndexAt(x, y); ok {
 				a.setActiveSession(idx)
 				a.resetCursorBlink()
 				return false, nil
@@ -490,7 +538,7 @@ func (a *App) footerPrompt() string {
 		if len(a.sessions) == 0 {
 			return "click tabs/select | F2 back | q/F10 quit"
 		}
-		return "click tabs/sessions | wheel scrollback | drag select | Shift forces local mouse | Ctrl+Shift+C/V copy/paste | F2 back | F6 next | F8 close | q/F10 quit"
+		return "click tabs/sessions | r reconnect | wheel scrollback | drag select | Shift forces local mouse | Ctrl+Shift+C/V copy/paste | F2 back | F6 next | F8 close | q/F10 quit"
 	}
 	if a.inSFTPTab() {
 		if a.sftp == nil {
@@ -504,7 +552,11 @@ func (a *App) footerPrompt() string {
 	} else if a.currentKind() == domain.KindForward {
 		enterAction = "Enter/Space toggle"
 	}
-	return "click tabs/select | a add | d detail | e edit | Del/x delete | / filter | r reload | " + enterAction + " | q/F10 quit"
+	reloadAction := "r reload"
+	if a.currentKind() == domain.KindForward {
+		reloadAction = "r reload/reconnect"
+	}
+	return "click tabs/select | a add | d detail | e edit | Del/x delete | / filter | " + reloadAction + " | " + enterAction + " | q/F10 quit"
 }
 
 func (a *App) renderList(w, h int) {
@@ -582,7 +634,7 @@ func (a *App) renderSessions(w, h int) {
 	}
 	x := 0
 	for idx, session := range a.sessions {
-		label := " [" + session.Name + "] "
+		label := a.sessionTabLabel(session)
 		style := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorSilver)
 		if idx == a.activeSession {
 			style = tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorDarkGreen)
@@ -666,13 +718,8 @@ func (a *App) collectSessionUpdates() {
 	for _, session := range a.sessions {
 		select {
 		case err := <-session.Done():
-			if err != nil {
-				a.status = err.Error()
-			}
-			_ = session.Close()
-			delete(a.scrollOffsets, session)
-			if a.selection.Session == session {
-				a.clearSelection()
+			if a.handleSessionDone(session, err) {
+				next = append(next, session)
 			}
 		default:
 			next = append(next, session)
@@ -685,9 +732,51 @@ func (a *App) collectSessionUpdates() {
 	a.transitionSessionFocus(previous, a.currentSession())
 }
 
+func (a *App) handleSessionDone(session *service.EmbeddedSession, err error) bool {
+	runtime := a.sessionRuntime(session)
+	_ = session.Close()
+	if runtime.closing {
+		a.removeFinishedSession(session)
+		return false
+	}
+	if sessionEndedNormally(err) {
+		runtime.status = sessionStatusFinished
+		runtime.reason = ""
+		a.status = fmt.Sprintf("Session %q ended.", session.Name)
+		a.removeFinishedSession(session)
+		return false
+	}
+	runtime.status = sessionStatusDisconnected
+	runtime.reason = err.Error()
+	runtime.attempts = 0
+	a.status = fmt.Sprintf("Session %q disconnected: %s", runtime.label, runtime.reason)
+	if !runtime.prompted {
+		runtime.prompted = true
+		a.openSessionReconnectConfirm(session, runtime.reason)
+	}
+	return true
+}
+
+func (a *App) removeFinishedSession(session *service.EmbeddedSession) {
+	a.removeSessionRuntime(session)
+	delete(a.scrollOffsets, session)
+	if a.selection.Session == session {
+		a.clearSelection()
+	}
+}
+
 func (a *App) collectForwardUpdates() {
-	// Forward lifecycle updates are owned by the watcher goroutine created by
-	// toggleSelectedForward. The ticker still re-renders status changes.
+	if a.hasModal() {
+		return
+	}
+	for id, runtime := range a.runningForwards {
+		if runtime == nil || runtime.status != forwardStatusDisconnected || runtime.prompted {
+			continue
+		}
+		runtime.prompted = true
+		a.openForwardReconnectConfirm(id, firstNonEmpty(runtime.label, id), runtime.reason, runtime)
+		return
+	}
 }
 
 func (a *App) currentKind() domain.DocumentKind {
@@ -738,6 +827,11 @@ func (a *App) openSelectedHostSession(ctx context.Context) error {
 			_ = a.clipboard.WriteText(value)
 		})
 	}
+	a.setSessionRuntime(session, &sessionRuntime{
+		hostID: record.ID,
+		label:  record.Label,
+		status: sessionStatusRunning,
+	})
 	a.sessions = append(a.sessions, session)
 	a.scrollToBottom(session)
 	a.status = ""
@@ -756,17 +850,7 @@ func (a *App) toggleSelectedForward(ctx context.Context) error {
 		a.runningForwards = map[string]*forwardRuntime{}
 	}
 	if runtime := a.runningForwards[record.ID]; runtime != nil && runtime.active() {
-		runtime.stopping = true
-		if runtime.cancel != nil {
-			runtime.cancel()
-		}
-		if runtime.running != nil {
-			_ = runtime.running.Close()
-		}
-		runtime.running = nil
-		runtime.status = forwardStatusStopped
-		runtime.reason = "stopped by user"
-		a.status = fmt.Sprintf("Stopped forward %q.", record.Label)
+		a.requestStopForward(record.ID, record.Label)
 		return nil
 	}
 
@@ -780,6 +864,8 @@ func (a *App) toggleSelectedForward(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	runtime := &forwardRuntime{
 		cancel: cancel,
+		ctx:    runCtx,
+		label:  record.Label,
 		status: forwardStatusConnecting,
 	}
 	a.runningForwards[record.ID] = runtime
@@ -799,6 +885,173 @@ func (a *App) toggleSelectedForward(ctx context.Context) error {
 	return nil
 }
 
+func (a *App) reconnectSelectedForward(ctx context.Context) bool {
+	record := a.selectedRecord()
+	if record.ID == "" || a.currentKind() != domain.KindForward {
+		return false
+	}
+	runtime := a.runningForwards[record.ID]
+	if runtime == nil || (runtime.status != forwardStatusDisconnected && runtime.status != forwardStatusError) {
+		return false
+	}
+	go a.reconnectForward(ctx, record.ID, record.Label, runtime)
+	return true
+}
+
+func (a *App) sessionRuntime(session *service.EmbeddedSession) *sessionRuntime {
+	if session == nil {
+		return &sessionRuntime{}
+	}
+	if a.sessionRuntimes == nil {
+		a.sessionRuntimes = map[*service.EmbeddedSession]*sessionRuntime{}
+	}
+	runtime := a.sessionRuntimes[session]
+	if runtime == nil {
+		runtime = &sessionRuntime{
+			hostID: session.Resolved.HostID,
+			label:  session.Name,
+			status: sessionStatusRunning,
+		}
+		a.sessionRuntimes[session] = runtime
+	}
+	if runtime.label == "" {
+		runtime.label = session.Name
+	}
+	if runtime.hostID == "" {
+		runtime.hostID = session.Resolved.HostID
+	}
+	return runtime
+}
+
+func (a *App) setSessionRuntime(session *service.EmbeddedSession, runtime *sessionRuntime) {
+	if session == nil || runtime == nil {
+		return
+	}
+	if a.sessionRuntimes == nil {
+		a.sessionRuntimes = map[*service.EmbeddedSession]*sessionRuntime{}
+	}
+	a.sessionRuntimes[session] = runtime
+}
+
+func (a *App) removeSessionRuntime(session *service.EmbeddedSession) {
+	if a.sessionRuntimes == nil {
+		return
+	}
+	delete(a.sessionRuntimes, session)
+}
+
+func (a *App) sessionStatusLabel(session *service.EmbeddedSession) string {
+	runtime := a.sessionRuntime(session)
+	switch runtime.status {
+	case sessionStatusDisconnected:
+		return "disconnected"
+	case sessionStatusReconnecting:
+		return fmt.Sprintf("reconnecting %d/%d", runtime.attempts, service.MaxForwardReconnectAttempts)
+	case sessionStatusFinished:
+		return "finished"
+	default:
+		return ""
+	}
+}
+
+func (a *App) sessionTabLabel(session *service.EmbeddedSession) string {
+	if session == nil {
+		return " [] "
+	}
+	if status := a.sessionStatusLabel(session); status != "" {
+		return " [" + session.Name + ":" + status + "] "
+	}
+	return " [" + session.Name + "] "
+}
+
+func (a *App) reconnectCurrentSession(ctx context.Context) bool {
+	session := a.currentSession()
+	if session == nil {
+		return false
+	}
+	runtime := a.sessionRuntime(session)
+	if runtime.status != sessionStatusDisconnected && runtime.status != sessionStatusFinished {
+		return false
+	}
+	a.reconnectSession(ctx, session)
+	return true
+}
+
+func (a *App) openSessionReconnectConfirm(session *service.EmbeddedSession, reason string) {
+	runtime := a.sessionRuntime(session)
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Reconnect Session",
+			lines: wrapModalLines(fmt.Sprintf("Session %s disconnected: %s\n\nReconnect now?", runtime.label, reason), 68),
+			onConfirm: func(ctx context.Context, app *App) error {
+				app.reconnectSession(ctx, session)
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) reconnectSession(ctx context.Context, session *service.EmbeddedSession) {
+	index := a.sessionIndex(session)
+	if index < 0 {
+		return
+	}
+	runtime := a.sessionRuntime(session)
+	if runtime.hostID == "" {
+		runtime.status = sessionStatusDisconnected
+		runtime.reason = "missing host id for reconnect"
+		a.status = runtime.reason
+		return
+	}
+	runtime.prompted = false
+	oldOffset := a.scrollOffsetForSession(session)
+	for attempt := 1; attempt <= service.MaxForwardReconnectAttempts; attempt++ {
+		runtime.status = sessionStatusReconnecting
+		runtime.attempts = attempt
+		a.status = fmt.Sprintf("Reconnecting session %q %d/%d...", runtime.label, attempt, service.MaxForwardReconnectAttempts)
+		if attempt > 1 && !sleepContext(ctx, service.ForwardReconnectDelay(attempt-1)) {
+			return
+		}
+		w, h := a.screenSizeOrDefault()
+		next, err := a.connector.OpenEmbeddedSessionWithOptions(ctx, runtime.hostID, a.sessionPrompts(ctx), w, max(1, h-3), service.EmbeddedSessionOptions{
+			Terminal: session.Terminal,
+		})
+		if err != nil {
+			runtime.reason = err.Error()
+			continue
+		}
+		if a.clipboard != nil {
+			next.SetClipboardHandler(func(value string) {
+				_ = a.clipboard.WriteText(value)
+			})
+		}
+		nextRuntime := &sessionRuntime{
+			hostID: runtime.hostID,
+			label:  firstNonEmpty(runtime.label, next.Name),
+			status: sessionStatusRunning,
+		}
+		a.sessions[index] = next
+		a.setSessionRuntime(next, nextRuntime)
+		a.removeSessionRuntime(session)
+		delete(a.scrollOffsets, session)
+		if oldOffset > 0 {
+			a.setScrollOffset(next, oldOffset, next.Terminal.ScrollbackRows())
+		}
+		if a.selection.Session == session {
+			a.clearSelection()
+		}
+		a.status = fmt.Sprintf("Reconnected session %q.", nextRuntime.label)
+		a.transitionSessionFocus(session, a.currentSession())
+		return
+	}
+	runtime.status = sessionStatusDisconnected
+	runtime.attempts = service.MaxForwardReconnectAttempts
+	a.status = fmt.Sprintf("Session %q reconnect failed: %s", runtime.label, runtime.reason)
+	runtime.prompted = true
+	a.openSessionReconnectConfirm(session, runtime.reason)
+}
+
 func (a *App) closeRunningForwards() {
 	for id, runtime := range a.runningForwards {
 		runtime.stopping = true
@@ -812,10 +1065,119 @@ func (a *App) closeRunningForwards() {
 	}
 }
 
+func (a *App) closeSessionsNow() {
+	for _, session := range a.sessions {
+		if runtime := a.sessionRuntime(session); runtime != nil {
+			runtime.closing = true
+		}
+		_ = session.Close()
+	}
+	a.sessions = nil
+	a.sessionRuntimes = map[*service.EmbeddedSession]*sessionRuntime{}
+	a.scrollOffsets = map[*service.EmbeddedSession]int{}
+	a.clearSelection()
+}
+
+func (a *App) requestQuit() {
+	if a.hasModal() {
+		return
+	}
+	if !a.hasActiveSSHResource() {
+		a.exitRequested = true
+		return
+	}
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Quit Nermius",
+			lines: wrapModalLines("Active SSH resources are still open. Quit and close them?", 68),
+			onConfirm: func(context.Context, *App) error {
+				a.exitRequested = true
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) requestCloseSession(index int) {
+	if a.hasModal() {
+		return
+	}
+	if index < 0 || index >= len(a.sessions) {
+		return
+	}
+	session := a.sessions[index]
+	runtime := a.sessionRuntime(session)
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Close Session",
+			lines: wrapModalLines(fmt.Sprintf("Close session %s?", runtime.label), 68),
+			onConfirm: func(context.Context, *App) error {
+				if nextIndex := a.sessionIndex(session); nextIndex >= 0 {
+					a.closeSessionAt(nextIndex)
+				}
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) requestStopForward(id, label string) {
+	if a.hasModal() {
+		return
+	}
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Stop Forward",
+			lines: wrapModalLines(fmt.Sprintf("Stop forward %s?", label), 68),
+			onConfirm: func(context.Context, *App) error {
+				a.stopForward(id, label)
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) stopForward(id, label string) {
+	runtime := a.runningForwards[id]
+	if runtime == nil {
+		return
+	}
+	runtime.stopping = true
+	if runtime.cancel != nil {
+		runtime.cancel()
+	}
+	if runtime.running != nil {
+		_ = runtime.running.Close()
+	}
+	runtime.running = nil
+	runtime.status = forwardStatusStopped
+	runtime.reason = "stopped by user"
+	runtime.attempts = 0
+	a.status = fmt.Sprintf("Stopped forward %q.", label)
+}
+
+func (a *App) hasActiveSSHResource() bool {
+	if len(a.sessions) > 0 {
+		return true
+	}
+	for _, runtime := range a.runningForwards {
+		if runtime != nil && runtime.active() {
+			return true
+		}
+	}
+	return a.hasRemoteSFTPPane()
+}
+
 func (a *App) watchForward(id, label string, ctx context.Context, runtime *forwardRuntime) {
 	for {
 		if runtime.running == nil {
 			return
+		}
+		if runtime.label == "" {
+			runtime.label = label
 		}
 		err := <-runtime.running.Done()
 		if runtime.stopping || ctx.Err() != nil {
@@ -826,33 +1188,66 @@ func (a *App) watchForward(id, label string, ctx context.Context, runtime *forwa
 		}
 		runtime.running = nil
 		runtime.reason = err.Error()
-		for attempt := 1; attempt <= service.MaxForwardReconnectAttempts; attempt++ {
-			runtime.status = forwardStatusReconnecting
-			runtime.attempts = attempt
-			a.status = fmt.Sprintf("Forward %q disconnected: %v; reconnecting %d/%d.", label, err, attempt, service.MaxForwardReconnectAttempts)
-			if !sleepContext(ctx, service.ForwardReconnectDelay(attempt)) {
-				return
-			}
-			next, reconnectErr := a.connector.StartForward(ctx, id, a.backgroundForwardPrompts())
-			if reconnectErr == nil {
-				runtime.running = next
-				runtime.started = next.Started
-				runtime.status = forwardStatusRunning
-				runtime.attempts = 0
-				runtime.reason = ""
-				a.status = fmt.Sprintf("Reconnected forward %q.", label)
-				break
-			}
-			runtime.reason = reconnectErr.Error()
-			err = reconnectErr
-		}
-		if runtime.running == nil {
-			runtime.status = forwardStatusError
-			runtime.attempts = service.MaxForwardReconnectAttempts
-			a.status = fmt.Sprintf("Forward %q stopped after %d reconnect attempts: %s", label, service.MaxForwardReconnectAttempts, runtime.reason)
+		runtime.status = forwardStatusDisconnected
+		runtime.attempts = 0
+		runtime.prompted = false
+		a.status = fmt.Sprintf("Forward %q disconnected: %s", label, runtime.reason)
+		return
+	}
+}
+
+func (a *App) openForwardReconnectConfirm(id, label, reason string, runtime *forwardRuntime) {
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Reconnect Forward",
+			lines: wrapModalLines(fmt.Sprintf("Forward %s disconnected: %s\n\nReconnect now?", label, reason), 68),
+			onConfirm: func(ctx context.Context, app *App) error {
+				go app.reconnectForward(ctx, id, label, runtime)
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) reconnectForward(ctx context.Context, id, label string, runtime *forwardRuntime) {
+	if runtime == nil {
+		return
+	}
+	runtime.prompted = false
+	if runtime.ctx == nil || runtime.ctx.Err() != nil || runtime.cancel == nil {
+		runCtx, cancel := context.WithCancel(ctx)
+		runtime.ctx = runCtx
+		runtime.cancel = cancel
+	}
+	ctx = runtime.ctx
+	runtime.label = firstNonEmpty(runtime.label, label)
+	for attempt := 1; attempt <= service.MaxForwardReconnectAttempts; attempt++ {
+		runtime.status = forwardStatusReconnecting
+		runtime.attempts = attempt
+		a.status = fmt.Sprintf("Reconnecting forward %q %d/%d...", label, attempt, service.MaxForwardReconnectAttempts)
+		if attempt > 1 && !sleepContext(ctx, service.ForwardReconnectDelay(attempt-1)) {
 			return
 		}
+		next, err := a.connector.StartForward(ctx, id, a.backgroundForwardPrompts())
+		if err != nil {
+			runtime.reason = err.Error()
+			continue
+		}
+		runtime.running = next
+		runtime.started = next.Started
+		runtime.status = forwardStatusRunning
+		runtime.attempts = 0
+		runtime.reason = ""
+		runtime.stopping = false
+		a.status = fmt.Sprintf("Reconnected forward %q.", label)
+		go a.watchForward(id, label, ctx, runtime)
+		return
 	}
+	runtime.status = forwardStatusDisconnected
+	runtime.attempts = service.MaxForwardReconnectAttempts
+	a.status = fmt.Sprintf("Forward %q reconnect failed: %s", label, runtime.reason)
+	runtime.prompted = false
 }
 
 func (a *App) backgroundForwardPrompts() service.Prompts {
@@ -883,6 +1278,11 @@ func (a *App) forwardSessionKey(ev *tcell.EventKey) error {
 		return nil
 	}
 	session := a.sessions[a.activeSession]
+	runtime := a.sessionRuntime(session)
+	if runtime.status == sessionStatusDisconnected || runtime.status == sessionStatusReconnecting || runtime.status == sessionStatusFinished {
+		a.status = "Session is not connected. Press r to reconnect or F8 to close."
+		return nil
+	}
 	a.scrollToBottom(session)
 	return session.WriteKeys(payload)
 }
@@ -899,6 +1299,15 @@ func (a *App) handleSessionMouse(ev *tcell.EventMouse, prevButtons tcell.ButtonM
 	cols, rows := view.Size()
 	historyRows := accessibleScrollbackRows(view, mode)
 	view.Unlock()
+
+	if runtime := a.sessionRuntime(session); runtime.status == sessionStatusDisconnected || runtime.status == sessionStatusReconnecting || runtime.status == sessionStatusFinished {
+		if ev.Buttons()&(tcell.WheelUp|tcell.WheelDown) != 0 {
+			a.adjustScrollOffset(session, scrollDeltaForWheel(ev.Buttons()), historyRows)
+		} else {
+			a.status = "Session is not connected. Press r to reconnect or F8 to close."
+		}
+		return true, nil
+	}
 
 	if a.shouldUseLocalScrollback(ev, mode, historyRows) {
 		a.adjustScrollOffset(session, scrollDeltaForWheel(ev.Buttons()), historyRows)
@@ -1206,19 +1615,101 @@ func tabIndexAt(x, y int, tabs []domain.DocumentKind) (int, bool) {
 	return 0, false
 }
 
-func sessionTabIndexAt(x, y int, sessions []*service.EmbeddedSession) (int, bool) {
+func (a *App) sessionTabIndexAt(x, y int) (int, bool) {
 	if y != 1 || x < 0 {
 		return 0, false
 	}
 	offset := 0
-	for idx, session := range sessions {
-		label := " [" + session.Name + "] "
+	for idx, session := range a.sessions {
+		label := a.sessionTabLabel(session)
 		if x >= offset && x < offset+len(label) {
 			return idx, true
 		}
 		offset += len(label)
 	}
 	return 0, false
+}
+
+func (a *App) sessionIndex(target *service.EmbeddedSession) int {
+	for index, session := range a.sessions {
+		if session == target {
+			return index
+		}
+	}
+	return -1
+}
+
+func (a *App) screenSizeOrDefault() (int, int) {
+	if a.screen == nil {
+		return 120, 35
+	}
+	w, h := a.screen.Size()
+	if w <= 0 {
+		w = 120
+	}
+	if h <= 0 {
+		h = 35
+	}
+	return w, h
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sessionEndedNormally(err error) bool {
+	if err == nil {
+		return true
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		return true
+	}
+	return false
+}
+
+func isTransportDisconnect(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection reset",
+		"broken pipe",
+		"use of closed network connection",
+		"connection refused",
+		"connection aborted",
+		"connection lost",
+		"closed pipe",
+		"eof",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func sftpErrorStatus(err error) string {
+	if err == nil {
+		return ""
+	}
+	if isTransportDisconnect(err) {
+		return "SFTP disconnected: " + err.Error()
+	}
+	return err.Error()
 }
 
 func (a *App) isDoubleClick(kind domain.DocumentKind, index int, now time.Time) bool {
@@ -1420,6 +1911,8 @@ func (a *App) forwardStatusDisplay(id string) (string, tcell.Color) {
 		return "running", tcell.ColorGreen
 	case forwardStatusReconnecting:
 		return fmt.Sprintf("reconnecting %d/%d", runtime.attempts, service.MaxForwardReconnectAttempts), tcell.ColorYellow
+	case forwardStatusDisconnected:
+		return "disconnected", tcell.ColorRed
 	case forwardStatusError:
 		return "error", tcell.ColorRed
 	default:
@@ -1569,8 +2062,11 @@ func (a *App) closeSessionAt(index int) {
 	}
 	previous := a.currentSession()
 	session := a.sessions[index]
+	runtime := a.sessionRuntime(session)
+	runtime.closing = true
 	_ = session.Close()
 	a.sessions = append(a.sessions[:index], a.sessions[index+1:]...)
+	a.removeSessionRuntime(session)
 	delete(a.scrollOffsets, session)
 	if a.selection.Session == session {
 		a.clearSelection()

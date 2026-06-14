@@ -71,6 +71,10 @@ type EmbeddedSession struct {
 	done     chan error
 }
 
+type EmbeddedSessionOptions struct {
+	Terminal termemu.Terminal
+}
+
 type RunningForward struct {
 	Forward  domain.Forward
 	Host     domain.ResolvedConfig
@@ -188,6 +192,10 @@ func (c *Connector) Exec(ctx context.Context, spec, command string, prompts Prom
 }
 
 func (c *Connector) OpenEmbeddedSession(ctx context.Context, spec string, prompts Prompts, cols, rows int) (*EmbeddedSession, error) {
+	return c.OpenEmbeddedSessionWithOptions(ctx, spec, prompts, cols, rows, EmbeddedSessionOptions{})
+}
+
+func (c *Connector) OpenEmbeddedSessionWithOptions(ctx context.Context, spec string, prompts Prompts, cols, rows int, opts EmbeddedSessionOptions) (*EmbeddedSession, error) {
 	resolved, client, cleanups, err := c.openClient(ctx, spec, prompts)
 	if err != nil {
 		return nil, err
@@ -204,7 +212,12 @@ func (c *Connector) OpenEmbeddedSession(ctx context.Context, spec string, prompt
 	if rows <= 0 {
 		rows = 32
 	}
-	termView := termemu.New(cols, rows)
+	termView := opts.Terminal
+	if termView == nil {
+		termView = termemu.New(cols, rows)
+	} else {
+		termView.Resize(cols, rows)
+	}
 	stdout, err := session.StdoutPipe()
 	if err != nil {
 		closeAll(cleanups)

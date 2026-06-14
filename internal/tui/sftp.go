@@ -111,7 +111,7 @@ func (a *App) openHostSFTP(ctx context.Context, id, label string) error {
 	if id == "" {
 		return nil
 	}
-	a.closeSFTPPanes()
+	a.closeSFTPPanesNow()
 	a.sftp = newSFTPBrowserState()
 	if err := a.setSFTPPaneLocal(ctx, sftpPaneLeft); err != nil {
 		a.closeSFTP()
@@ -166,7 +166,7 @@ func (a *App) setSFTPPaneLocal(ctx context.Context, pane sftpPaneIndex) error {
 	if err != nil {
 		localPath = "."
 	}
-	a.closeSFTPPane(pane)
+	a.closeSFTPPaneNow(pane)
 	a.sftp.panes[pane] = sftpPaneState{kind: sftpPaneLocal, path: localPath}
 	return a.refreshSFTPPane(ctx, pane)
 }
@@ -185,7 +185,7 @@ func (a *App) setSFTPPaneRemote(ctx context.Context, pane sftpPaneIndex, id, lab
 	if err != nil {
 		return err
 	}
-	a.closeSFTPPane(pane)
+	a.closeSFTPPaneNow(pane)
 	a.sftp.panes[pane] = sftpPaneState{
 		kind:      sftpPaneRemote,
 		hostID:    id,
@@ -194,17 +194,21 @@ func (a *App) setSFTPPaneRemote(ctx context.Context, pane sftpPaneIndex, id, lab
 		path:      ".",
 	}
 	if err := a.refreshSFTPPane(ctx, pane); err != nil {
-		a.closeSFTPPane(pane)
+		a.closeSFTPPaneNow(pane)
 		return err
 	}
 	return nil
 }
 
 func (a *App) closeSFTP() {
+	a.closeSFTPNow()
+}
+
+func (a *App) closeSFTPNow() {
 	if a.sftp == nil {
 		return
 	}
-	a.closeSFTPPanes()
+	a.closeSFTPPanesNow()
 	a.sftp.transfer = nil
 	a.sftp = nil
 	if a.inSFTPTab() {
@@ -213,15 +217,37 @@ func (a *App) closeSFTP() {
 }
 
 func (a *App) closeSFTPPanes() {
+	a.closeSFTPPanesNow()
+}
+
+func (a *App) closeSFTPPanesNow() {
 	if a.sftp == nil {
 		return
 	}
 	for pane := sftpPaneLeft; pane < sftpPaneCount; pane++ {
-		a.closeSFTPPane(pane)
+		a.closeSFTPPaneNow(pane)
 	}
 }
 
 func (a *App) closeSFTPPane(pane sftpPaneIndex) {
+	if a.sftp != nil && pane >= 0 && pane < sftpPaneCount && a.sftp.panes[pane].kind == sftpPaneRemote {
+		a.pushModal(modalState{
+			kind: modalKindConfirm,
+			confirm: &confirmModal{
+				title: "Close SFTP Pane",
+				lines: wrapModalLines(fmt.Sprintf("Close %s remote SFTP pane?", sftpPaneName(pane)), 68),
+				onConfirm: func(context.Context, *App) error {
+					a.closeSFTPPaneNow(pane)
+					return nil
+				},
+			},
+		})
+		return
+	}
+	a.closeSFTPPaneNow(pane)
+}
+
+func (a *App) closeSFTPPaneNow(pane sftpPaneIndex) {
 	if a.sftp == nil || pane < 0 || pane >= sftpPaneCount {
 		return
 	}
@@ -229,6 +255,30 @@ func (a *App) closeSFTPPane(pane sftpPaneIndex) {
 		_ = a.sftp.panes[pane].session.Close()
 	}
 	a.sftp.panes[pane] = sftpPaneState{}
+}
+
+func (a *App) requestCloseSFTP() {
+	if !a.hasRemoteSFTPPane() {
+		a.closeSFTPNow()
+		a.status = "Closed SFTP connection."
+		return
+	}
+	a.pushModal(modalState{
+		kind: modalKindConfirm,
+		confirm: &confirmModal{
+			title: "Close SFTP",
+			lines: wrapModalLines("Close remote SFTP panes?", 68),
+			onConfirm: func(context.Context, *App) error {
+				a.closeSFTPNow()
+				a.status = "Closed SFTP connection."
+				return nil
+			},
+		},
+	})
+}
+
+func (a *App) hasRemoteSFTPPane() bool {
+	return a.sftp != nil && (a.sftp.panes[sftpPaneLeft].kind == sftpPaneRemote || a.sftp.panes[sftpPaneRight].kind == sftpPaneRemote)
 }
 
 func (a *App) refreshSFTP(ctx context.Context) error {
@@ -261,7 +311,7 @@ func (a *App) refreshSFTPPane(ctx context.Context, pane sftpPaneIndex) error {
 		}
 		entries, err := state.session.ReadDir(ctx, state.path)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s", sftpErrorStatus(err))
 		}
 		state.entries = entries
 	default:
@@ -314,17 +364,17 @@ func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, erro
 		case tcell.KeyF2:
 			a.setActiveTab(0)
 		case tcell.KeyF10, tcell.KeyEscape:
-			return true, nil
+			a.requestQuit()
 		default:
 			if ev.Key() == tcell.KeyRune && ev.Rune() == 'q' {
-				return true, nil
+				a.requestQuit()
 			}
 		}
 		return false, nil
 	}
 	switch ev.Key() {
 	case tcell.KeyF10:
-		return true, nil
+		a.requestQuit()
 	case tcell.KeyLeft:
 		a.moveActiveTab(-1)
 	case tcell.KeyRight:
@@ -357,7 +407,7 @@ func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, erro
 		}
 		switch ev.Rune() {
 		case 'q':
-			return true, nil
+			a.requestQuit()
 		case 'r':
 			if err := a.refreshSFTP(ctx); err != nil {
 				a.status = err.Error()
@@ -379,8 +429,7 @@ func (a *App) handleSFTPKey(ctx context.Context, ev *tcell.EventKey) (bool, erro
 		case 'R':
 			a.openSFTPRenamePrompt(ctx)
 		case 'c':
-			a.closeSFTP()
-			a.status = "Closed SFTP connection."
+			a.requestCloseSFTP()
 		}
 	}
 	return false, nil
@@ -735,7 +784,7 @@ func (a *App) collectSFTPUpdates(ctx context.Context) {
 	case result := <-a.sftp.transfer.done:
 		a.sftp.transfer = nil
 		if result.err != nil {
-			a.status = result.err.Error()
+			a.status = sftpErrorStatus(result.err)
 			return
 		}
 		if result.message != "" {
@@ -768,7 +817,7 @@ func (a *App) openSFTPMkdirPrompt(ctx context.Context) {
 			}
 			remotePath := service.JoinSFTPRemotePath(pane.path, input)
 			if err := pane.session.Mkdir(ctx, remotePath, false); err != nil {
-				app.status = err.Error()
+				app.status = sftpErrorStatus(err)
 				return
 			}
 			app.status = "Created " + remotePath + "."
@@ -804,7 +853,7 @@ func (a *App) openSFTPDeleteConfirm(ctx context.Context) {
 					return nil
 				}
 				if err := pane.session.Remove(ctx, entry.Path, entry.IsDir); err != nil {
-					app.status = err.Error()
+					app.status = sftpErrorStatus(err)
 					return nil
 				}
 				app.status = "Removed " + entry.Path + "."
@@ -840,7 +889,7 @@ func (a *App) openSFTPRenamePrompt(ctx context.Context) {
 			}
 			newPath := service.NormalizeSFTPRemotePath(input)
 			if err := pane.session.Rename(ctx, entry.Path, newPath); err != nil {
-				app.status = err.Error()
+				app.status = sftpErrorStatus(err)
 				return
 			}
 			app.status = "Renamed " + entry.Path + " to " + newPath + "."
