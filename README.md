@@ -198,6 +198,7 @@ Behavior notes:
 - normal commands auto-try the enrolled keychain backend first, then fall back to the master password.
 - `vault keychain status` reports both the unlock-material backend and the user-presence backend.
 - on Windows, default unlock material is DPAPI-protected. `--require-presence` moves the protection boundary into Windows CNG, so changing Nermius' SQLite metadata alone cannot silently downgrade the existing strong enrollment into a DPAPI unlock.
+- if keychain unlock fails but the master password unlocks the vault, interactive CLI commands explain the keychain failure and offer to disable that local enrollment. This is equivalent to running `nermius vault keychain disable`; it does not rewrite vault records or remove master-password access.
 - a malicious same-user process may still invoke Nermius or Windows APIs and cause an OS authorization prompt, deny access by deleting local key material, or wait for the user to approve a prompt. The strong mode is meant to prevent silent vault-key unwrap, not to defend against a fully compromised user session.
 - current-schema vaults use whole-vault encrypted records, so hostnames, usernames, labels, known-host payloads, and secrets are no longer stored as plaintext rows in SQLite.
 - `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault.

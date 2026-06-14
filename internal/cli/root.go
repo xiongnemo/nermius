@@ -99,17 +99,59 @@ func (r *runtime) openCatalog(ctx context.Context) (*service.Catalog, *store.Sto
 	if err != nil {
 		return nil, nil, config.Paths{}, err
 	}
-	masterKey, db, err := manager.ResolveMasterKey(ctx, promptSecret)
+	resolution, err := manager.ResolveMasterKeyDetailed(ctx, promptSecret)
 	if err != nil {
+		return nil, nil, config.Paths{}, err
+	}
+	masterKey := resolution.Key
+	db := resolution.DB
+	if err := r.offerKeychainFallbackCleanup(ctx, manager, resolution); err != nil {
+		_ = db.Close()
+		zeroBytesLocal(masterKey)
 		return nil, nil, config.Paths{}, err
 	}
 	if err := manager.EnsureCurrentSchema(ctx, db); err != nil {
 		_ = db.Close()
+		zeroBytesLocal(masterKey)
 		return nil, nil, config.Paths{}, err
 	}
-	return service.NewCatalogWithWriteKeyProvider(db, masterKey, func(inner context.Context) ([]byte, error) {
+	writeKeyProvider := func(inner context.Context) ([]byte, error) {
 		return manager.ResolveWriteKey(inner, db, promptSecret)
-	}), db, manager.Paths, nil
+	}
+	if resolution.Source == service.MasterKeySourcePassword {
+		writeKeyProvider = func(inner context.Context) ([]byte, error) {
+			return append([]byte(nil), masterKey...), nil
+		}
+	}
+	return service.NewCatalogWithWriteKeyProvider(db, masterKey, writeKeyProvider), db, manager.Paths, nil
+}
+
+func (r *runtime) offerKeychainFallbackCleanup(ctx context.Context, manager *service.VaultManager, resolution service.MasterKeyResolution) error {
+	if !shouldOfferKeychainFallbackCleanup(resolution) {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Keychain unlock failed for mode %q: %v\n", resolution.KeychainMode, resolution.KeychainError)
+	fmt.Fprintln(os.Stderr, "The master password unlocked the vault successfully.")
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprintln(os.Stderr, "Run `nermius vault keychain disable` to stop trying this local keychain enrollment.")
+		return nil
+	}
+	disable, err := promptConfirm("Disable this local keychain enrollment and use the master password until re-enabled")
+	if err != nil {
+		return err
+	}
+	if !disable {
+		return nil
+	}
+	if err := manager.DisableKeychain(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "Keychain enrollment disabled. Run `nermius vault keychain enable` later to re-enable it.")
+	return nil
+}
+
+func shouldOfferKeychainFallbackCleanup(resolution service.MasterKeyResolution) bool {
+	return resolution.Source == service.MasterKeySourcePassword && resolution.KeychainConfigured && resolution.KeychainError != nil
 }
 
 func (r *runtime) newVaultCmd() *cobra.Command {
@@ -957,6 +999,12 @@ func promptConfirm(label string) (bool, error) {
 		default:
 			fmt.Fprintln(os.Stderr, "Please answer y or n.")
 		}
+	}
+}
+
+func zeroBytesLocal(data []byte) {
+	for i := range data {
+		data[i] = 0
 	}
 }
 

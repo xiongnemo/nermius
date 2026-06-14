@@ -261,22 +261,14 @@ func (m *VaultManager) DisableKeychain(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	mode, err := m.keychainMode(ctx, db)
-	if err != nil {
+	return m.clearKeychainEnrollment(ctx, db, vaultID)
+}
+
+func (m *VaultManager) clearKeychainEnrollment(ctx context.Context, db *store.Store, vaultID string) error {
+	if err := newUnlockMaterialStore(m.Paths).Delete(ctx, vaultID); err != nil {
 		return err
 	}
-	storeBackend := m.unlockStoreForMode(mode)
-	available, message := storeBackend.Available(ctx)
-	if !available {
-		if message == "" {
-			message = "system keychain backend unavailable"
-		}
-		return errors.New(message)
-	}
-	if err := storeBackend.Delete(ctx, vaultID); err != nil {
-		return err
-	}
-	if err := m.removeOtherKeychainEnrollment(ctx, vaultID, mode); err != nil {
+	if err := newStrongPresenceMaterialStore(m.Paths).Delete(ctx, vaultID); err != nil {
 		return err
 	}
 	if err := m.setKeychainRequirePresence(ctx, db, false); err != nil {
@@ -286,20 +278,36 @@ func (m *VaultManager) DisableKeychain(ctx context.Context) error {
 }
 
 func (m *VaultManager) ResolveMasterKey(ctx context.Context, prompt PasswordPrompter) ([]byte, *store.Store, error) {
+	resolution, err := m.ResolveMasterKeyDetailed(ctx, prompt)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resolution.Key, resolution.DB, nil
+}
+
+func (m *VaultManager) ResolveMasterKeyDetailed(ctx context.Context, prompt PasswordPrompter) (MasterKeyResolution, error) {
 	db, err := m.Open(ctx)
 	if err != nil {
-		return nil, nil, err
+		return MasterKeyResolution{}, err
 	}
-	key, err := m.resolveKeyWithStore(ctx, db, prompt, vaultAccessRead)
+	key, details, err := m.resolveKeyWithStore(ctx, db, prompt, vaultAccessRead)
 	if err != nil {
 		_ = db.Close()
-		return nil, nil, err
+		return MasterKeyResolution{}, err
 	}
-	return key, db, nil
+	return MasterKeyResolution{
+		Key:                key,
+		DB:                 db,
+		Source:             details.source,
+		KeychainMode:       details.keychainMode,
+		KeychainError:      details.keychainError,
+		KeychainConfigured: details.keychainConfigured,
+	}, nil
 }
 
 func (m *VaultManager) ResolveWriteKey(ctx context.Context, db *store.Store, prompt PasswordPrompter) ([]byte, error) {
-	return m.resolveKeyWithStore(ctx, db, prompt, vaultAccessWrite)
+	key, _, err := m.resolveKeyWithStore(ctx, db, prompt, vaultAccessWrite)
+	return key, err
 }
 
 func (m *VaultManager) EnsureCurrentSchema(ctx context.Context, db *store.Store) error {
@@ -408,14 +416,42 @@ func (m *VaultManager) MigrateVault(ctx context.Context, prompt PasswordPrompter
 	return db.Vacuum(ctx)
 }
 
-func (m *VaultManager) resolveKeyWithStore(ctx context.Context, db *store.Store, prompt PasswordPrompter, intent vaultAccessIntent) ([]byte, error) {
+type keyResolutionDetails struct {
+	source             string
+	keychainMode       string
+	keychainConfigured bool
+	keychainError      error
+}
+
+func (m *VaultManager) resolveKeyWithStore(ctx context.Context, db *store.Store, prompt PasswordPrompter, intent vaultAccessIntent) ([]byte, keyResolutionDetails, error) {
+	details := keyResolutionDetails{}
+	keychainMode, keychainConfigured, err := m.keychainConfigured(ctx, db)
+	details.keychainMode = keychainMode
+	details.keychainConfigured = keychainConfigured
+	if err != nil {
+		details.keychainConfigured = true
+		details.keychainError = err
+	}
 	if key, err := m.resolveFromKeychain(ctx, db, intent); err == nil {
-		return key, nil
+		details.source = MasterKeySourceKeychain
+		return key, details, nil
+	} else if details.keychainError == nil {
+		details.keychainError = err
 	}
 	if raw, ok := os.LookupEnv("NERMIUS_MASTER_PASSWORD"); ok && raw != "" {
-		return m.unwrapVaultKey(ctx, db, raw)
+		key, err := m.unwrapVaultKey(ctx, db, raw)
+		if err != nil {
+			return nil, details, err
+		}
+		details.source = MasterKeySourceEnv
+		return key, details, nil
 	}
-	return m.resolvePasswordPromptOnly(ctx, db, prompt)
+	key, err := m.resolvePasswordPromptOnly(ctx, db, prompt)
+	if err != nil {
+		return nil, details, err
+	}
+	details.source = MasterKeySourcePassword
+	return key, details, nil
 }
 
 func (m *VaultManager) resolvePasswordPromptOnly(ctx context.Context, db *store.Store, prompt PasswordPrompter) ([]byte, error) {
@@ -510,6 +546,33 @@ func (m *VaultManager) setKeychainMode(ctx context.Context, db *store.Store, mod
 		mode = KeychainModePlatform
 	}
 	return db.SetMeta(ctx, metaKeychainMode, mode)
+}
+
+func (m *VaultManager) keychainConfigured(ctx context.Context, db *store.Store) (string, bool, error) {
+	mode, err := m.keychainMode(ctx, db)
+	if err != nil {
+		return "", false, err
+	}
+	if mode == KeychainModeStrongPresence {
+		return mode, true, nil
+	}
+	vaultID, err := m.vaultID(ctx, db)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return mode, false, nil
+		}
+		return "", false, err
+	}
+	storeBackend := m.unlockStoreForMode(mode)
+	available, _ := storeBackend.Available(ctx)
+	if !available {
+		return mode, false, nil
+	}
+	enrolled, err := storeBackend.IsEnrolled(ctx, vaultID)
+	if err != nil {
+		return "", false, err
+	}
+	return mode, enrolled, nil
 }
 
 func (m *VaultManager) keychainRequirePresence(ctx context.Context, db *store.Store) (bool, error) {

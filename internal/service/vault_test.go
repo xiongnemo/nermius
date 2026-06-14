@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -242,6 +243,78 @@ func TestResolveStrongKeychainDoesNotUseAppLayerPresence(t *testing.T) {
 	}
 }
 
+func TestResolveDetailedReportsStrongKeychainFallbackToPassword(t *testing.T) {
+	ctx := context.Background()
+	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
+	if err := manager.Init(ctx, "master-pass"); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	db, err := manager.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if err := manager.setKeychainMode(ctx, db, KeychainModeStrongPresence); err != nil {
+		t.Fatalf("setKeychainMode failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	fakeStrongStore := &fakeUnlockStore{
+		available: true,
+		kind:      "fake-strong-keychain",
+		enrolled:  map[string]bool{},
+	}
+	restore := installFakeVaultBackends(&fakeUnlockStore{}, fakeStrongStore, &fakePresence{})
+	defer restore()
+
+	resolution, err := manager.ResolveMasterKeyDetailed(ctx, func(label string) (string, error) {
+		if label != "Master password" {
+			t.Fatalf("unexpected prompt label %q", label)
+		}
+		return "master-pass", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveMasterKeyDetailed failed: %v", err)
+	}
+	defer resolution.DB.Close()
+	defer zeroBytes(resolution.Key)
+	if resolution.Source != MasterKeySourcePassword {
+		t.Fatalf("expected password source, got %+v", resolution)
+	}
+	if !resolution.KeychainConfigured || resolution.KeychainMode != KeychainModeStrongPresence {
+		t.Fatalf("expected configured strong keychain fallback, got %+v", resolution)
+	}
+	if resolution.KeychainError == nil {
+		t.Fatalf("expected keychain error")
+	}
+}
+
+func TestResolveDetailedFallsBackWhenKeychainProbeFails(t *testing.T) {
+	ctx := context.Background()
+	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
+	if err := manager.Init(ctx, "master-pass"); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	fakeStore := &fakeUnlockStore{available: true, isEnrolledErr: errors.New("probe failed")}
+	restore := installFakeVaultBackends(fakeStore, &fakeUnlockStore{}, &fakePresence{})
+	defer restore()
+
+	resolution, err := manager.ResolveMasterKeyDetailed(ctx, func(label string) (string, error) {
+		return "master-pass", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveMasterKeyDetailed failed: %v", err)
+	}
+	defer resolution.DB.Close()
+	defer zeroBytes(resolution.Key)
+	if resolution.Source != MasterKeySourcePassword {
+		t.Fatalf("expected password source, got %+v", resolution)
+	}
+	if !resolution.KeychainConfigured || resolution.KeychainError == nil {
+		t.Fatalf("expected configured keychain probe error, got %+v", resolution)
+	}
+}
+
 func TestEnableKeychainWithOptionsStoresPresenceRequirement(t *testing.T) {
 	ctx := context.Background()
 	manager := NewVaultManager(mustResolveTestPaths(t, filepath.Join(t.TempDir(), "vault.db")))
@@ -393,11 +466,12 @@ func TestMigrateVaultMovesLegacyDataIntoEncryptedRecords(t *testing.T) {
 }
 
 type fakeUnlockStore struct {
-	available   bool
-	kind        string
-	stored      map[string][]byte
-	enrolled    map[string]bool
-	loadIntents []vaultAccessIntent
+	available     bool
+	kind          string
+	stored        map[string][]byte
+	enrolled      map[string]bool
+	isEnrolledErr error
+	loadIntents   []vaultAccessIntent
 }
 
 func (f *fakeUnlockStore) Kind() string {
@@ -415,6 +489,9 @@ func (f *fakeUnlockStore) Available(ctx context.Context) (bool, string) {
 }
 
 func (f *fakeUnlockStore) IsEnrolled(ctx context.Context, vaultID string) (bool, error) {
+	if f.isEnrolledErr != nil {
+		return false, f.isEnrolledErr
+	}
 	return f.enrolled[vaultID], nil
 }
 

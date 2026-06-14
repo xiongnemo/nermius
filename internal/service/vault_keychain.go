@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/nermius/nermius/internal/config"
+	"github.com/nermius/nermius/internal/store"
 )
 
 type vaultAccessIntent string
@@ -18,6 +19,12 @@ const (
 const (
 	KeychainModePlatform       = "platform"
 	KeychainModeStrongPresence = "windows-cng-presence"
+)
+
+const (
+	MasterKeySourceKeychain = "keychain"
+	MasterKeySourceEnv      = "env"
+	MasterKeySourcePassword = "password"
 )
 
 type UnlockMaterialStore interface {
@@ -51,6 +58,15 @@ type VaultStatus struct {
 
 type EnableKeychainOptions struct {
 	RequirePresence bool
+}
+
+type MasterKeyResolution struct {
+	Key                []byte
+	DB                 *store.Store
+	Source             string
+	KeychainMode       string
+	KeychainError      error
+	KeychainConfigured bool
 }
 
 var (

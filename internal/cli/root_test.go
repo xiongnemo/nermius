@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -213,6 +214,41 @@ func TestCompletionSuggestsVaultKeychainRequirePresenceFlag(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("--require-presence")) {
 		t.Fatalf("expected completion to suggest --require-presence, got:\n%s", out.String())
+	}
+}
+
+func TestShouldOfferKeychainFallbackCleanupOnlyAfterPasswordFallback(t *testing.T) {
+	if !shouldOfferKeychainFallbackCleanup(service.MasterKeyResolution{
+		Source:             service.MasterKeySourcePassword,
+		KeychainConfigured: true,
+		KeychainError:      errors.New("keychain failed"),
+	}) {
+		t.Fatal("expected cleanup offer after password fallback from configured keychain failure")
+	}
+	for name, resolution := range map[string]service.MasterKeyResolution{
+		"keychain-source": {
+			Source:             service.MasterKeySourceKeychain,
+			KeychainConfigured: true,
+			KeychainError:      errors.New("ignored"),
+		},
+		"env-source": {
+			Source:             service.MasterKeySourceEnv,
+			KeychainConfigured: true,
+			KeychainError:      errors.New("ignored"),
+		},
+		"not-configured": {
+			Source:             service.MasterKeySourcePassword,
+			KeychainConfigured: false,
+			KeychainError:      errors.New("ignored"),
+		},
+		"no-keychain-error": {
+			Source:             service.MasterKeySourcePassword,
+			KeychainConfigured: true,
+		},
+	} {
+		if shouldOfferKeychainFallbackCleanup(resolution) {
+			t.Fatalf("expected no cleanup offer for %s", name)
+		}
 	}
 }
 
