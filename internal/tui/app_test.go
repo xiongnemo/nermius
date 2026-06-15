@@ -250,7 +250,7 @@ func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 
 	app.workspace = newWorkspaceState()
 	app.setActiveTab(len(app.tabs))
-	if got := app.footerText(); !strings.Contains(got, "split right") || !strings.Contains(got, "r reconnect") {
+	if got := app.footerText(); !strings.Contains(got, "F8 close") || !strings.Contains(got, "F7/F9 split") {
 		t.Fatalf("workspace footer = %q, want workspace prompt", got)
 	}
 
@@ -341,6 +341,31 @@ func TestWorkspaceTabPlainArrowsNavigateTabs(t *testing.T) {
 	}
 	if !app.exitRequested {
 		t.Fatal("expected q on workspace tab to request quit")
+	}
+}
+
+func TestWorkspacePaneShowsCloseHintInHeader(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	defer screen.Fini()
+	screen.SetSize(48, 8)
+	workspace := newWorkspaceState()
+	app := &App{
+		screen:    screen,
+		workspace: workspace,
+	}
+
+	app.renderWorkspacePane(workspace.focusedPane(), workspaceRect{x: 0, y: 1, w: 48, h: 5})
+
+	header := simulationScreenText(screen, 0, 1, 48)
+	if !strings.Contains(header, "F8 close") {
+		t.Fatalf("workspace pane header = %q, want F8 close hint", header)
+	}
+	body := simulationScreenText(screen, 1, 2, 46)
+	if !strings.Contains(body, "F8 close") {
+		t.Fatalf("workspace pane body = %q, want F8 close hint", body)
 	}
 }
 

@@ -646,7 +646,7 @@ func (a *App) footerPrompt() string {
 		if a.workspace == nil {
 			return "HOST Enter/F7/F9 or LAYOUT Enter | F2 back | q/F10 quit"
 		}
-		return "F5 host | F7 split right | F9 split down | F6 next | Alt+Arrows focus | Ctrl+Alt+Arrows resize | F4 save | F8 close | F11 zoom | r reconnect | wheel scrollback | q/F10 quit"
+		return "F5 host | F7/F9 split | F8 close | F6/Alt move | F3/F4 layout | r reconn | q quit"
 	}
 	if a.inSFTPTab() {
 		if a.sftp == nil {
@@ -763,7 +763,15 @@ func (a *App) renderWorkspacePane(pane *workspacePane, rect workspaceRect) {
 	}
 	fillPartialRow(a.screen, rect.x, rect.y, rect.w, titleStyle)
 	title := fmt.Sprintf(" %s [%s] ", workspacePaneLabel(pane), workspacePaneStatusLabel(pane))
-	drawText(a.screen, rect.x, rect.y, titleStyle, truncate(title, rect.w))
+	titleWidth := rect.w
+	if active {
+		hint := " F8 close "
+		if rect.w > len(hint)+4 {
+			titleWidth = rect.w - len(hint)
+			drawText(a.screen, rect.x+rect.w-len(hint), rect.y, titleStyle, hint)
+		}
+	}
+	drawText(a.screen, rect.x, rect.y, titleStyle, truncate(title, titleWidth))
 	for y := rect.y; y < rect.y+rect.h; y++ {
 		if rect.w > 0 {
 			a.screen.SetContent(rect.x, y, ' ', nil, tcell.StyleDefault.Background(tcell.ColorDarkSlateGray))
@@ -777,14 +785,27 @@ func (a *App) renderWorkspacePane(pane *workspacePane, rect workspaceRect) {
 	}
 	content := workspaceContentRect(rect)
 	if pane.session == nil {
-		message := "Empty pane. Press F5 to pick a Host."
-		if pane.hostID != "" {
-			message = "Pending SSH pane. Press Enter or F5 to connect."
-		}
+		message := workspacePaneEmptyMessage(pane)
 		drawText(a.screen, content.x, content.y, tcell.StyleDefault.Foreground(tcell.ColorGray), truncate(message, content.w))
 		return
 	}
 	a.renderSessionInRect(pane.session, content)
+}
+
+func workspacePaneEmptyMessage(pane *workspacePane) string {
+	if pane == nil || pane.hostID == "" {
+		return "Empty pane. F5 host, F8 close."
+	}
+	switch pane.status {
+	case workspacePaneDisconnected:
+		return "SSH pane disconnected. r reconnect, F8 close."
+	case workspacePaneReconnecting:
+		return "SSH pane reconnecting. F8 close."
+	case workspacePaneFinished:
+		return "SSH pane ended. Enter/r reconnect, F8 close."
+	default:
+		return "Pending SSH pane. Enter connect, F5 change, F8 close."
+	}
 }
 
 func workspaceContentRect(rect workspaceRect) workspaceRect {
