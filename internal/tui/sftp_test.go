@@ -25,6 +25,31 @@ func TestSFTPTabIndexAndFooter(t *testing.T) {
 	}
 }
 
+func TestSFTPTabMouseHitUsesDisplayedLabels(t *testing.T) {
+	tabs := []domain.DocumentKind{
+		domain.KindHost,
+		domain.KindGroup,
+		domain.KindProfile,
+		domain.KindIdentity,
+		domain.KindKey,
+		domain.KindForward,
+		domain.KindWorkspace,
+		domain.KindKnownHost,
+	}
+	kinds := specialTabKinds(tabs)
+	x := 0
+	for _, kind := range kinds[:len(kinds)-1] {
+		x += len(" " + displayKindName(kind) + " ")
+	}
+	tab, ok := tabIndexAt(x+1, 0, kinds)
+	if !ok {
+		t.Fatal("expected SFTP tab hit")
+	}
+	if tab != len(tabs)+1 {
+		t.Fatalf("tab hit = %d, want SFTP tab %d", tab, len(tabs)+1)
+	}
+}
+
 func TestSFTPTogglePaneAndCursorClamp(t *testing.T) {
 	app := &App{
 		tabs: []domain.DocumentKind{domain.KindHost},

@@ -250,7 +250,7 @@ func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 
 	app.workspace = newWorkspaceState()
 	app.setActiveTab(len(app.tabs))
-	if got := app.footerText(); !strings.Contains(got, "F8 close") || !strings.Contains(got, "F7/F9 split") {
+	if got := app.footerText(); !strings.Contains(got, "F8 close") || !strings.Contains(got, "F2 back") {
 		t.Fatalf("workspace footer = %q, want workspace prompt", got)
 	}
 
@@ -302,7 +302,7 @@ func TestLayoutTabUsesListNavigationAndQuit(t *testing.T) {
 	}
 }
 
-func TestWorkspaceTabPlainArrowsNavigateTabs(t *testing.T) {
+func TestWorkspaceTabPlainKeysStayInTerminalView(t *testing.T) {
 	app := &App{
 		tabs: []domain.DocumentKind{
 			domain.KindHost,
@@ -318,6 +318,11 @@ func TestWorkspaceTabPlainArrowsNavigateTabs(t *testing.T) {
 		workspace:       newWorkspaceState(),
 		sessionRuntimes: map[*service.EmbeddedSession]*sessionRuntime{},
 	}
+	pane := app.workspace.focusedPane()
+	session := &service.EmbeddedSession{Name: "one", Terminal: termemu.New(4, 2)}
+	pane.session = session
+	pane.status = workspacePaneConnected
+	app.setSessionRuntime(session, &sessionRuntime{hostID: "host-1", label: "one", status: sessionStatusDisconnected})
 
 	if !app.inSessionTab() {
 		t.Fatal("expected active tab to be workspace view")
@@ -325,22 +330,24 @@ func TestWorkspaceTabPlainArrowsNavigateTabs(t *testing.T) {
 	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModNone)); err != nil {
 		t.Fatalf("handleKey(left) returned error: %v", err)
 	}
-	if app.activeTab != 7 {
-		t.Fatalf("active tab after left = %d, want known-host tab 7", app.activeTab)
+	if app.activeTab != 8 {
+		t.Fatalf("active tab after left = %d, want workspace tab 8", app.activeTab)
 	}
-	app.setActiveTab(8)
+	if !strings.Contains(app.status, "Session is not connected") {
+		t.Fatalf("status after left = %q, want terminal forwarding status", app.status)
+	}
+	app.status = ""
 	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone)); err != nil {
 		t.Fatalf("handleKey(right) returned error: %v", err)
 	}
-	if app.activeTab != 9 {
-		t.Fatalf("active tab after right = %d, want sftp tab 9", app.activeTab)
+	if app.activeTab != 8 {
+		t.Fatalf("active tab after right = %d, want workspace tab 8", app.activeTab)
 	}
-	app.setActiveTab(8)
 	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
 		t.Fatalf("handleKey(q) returned error: %v", err)
 	}
-	if !app.exitRequested {
-		t.Fatal("expected q on workspace tab to request quit")
+	if app.exitRequested {
+		t.Fatal("did not expect q on workspace tab to request app quit")
 	}
 }
 

@@ -303,9 +303,8 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 				a.focusWorkspaceDirection(-1, 0)
 				return false, nil
 			}
-			a.moveActiveTab(-1)
 			a.resetCursorBlink()
-			return false, nil
+			return false, a.forwardSessionKey(ev)
 		case tcell.KeyRight:
 			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
 				a.resizeFocusedWorkspacePane(5, 0)
@@ -315,9 +314,8 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 				a.focusWorkspaceDirection(1, 0)
 				return false, nil
 			}
-			a.moveActiveTab(1)
 			a.resetCursorBlink()
-			return false, nil
+			return false, a.forwardSessionKey(ev)
 		case tcell.KeyUp:
 			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
 				a.resizeFocusedWorkspacePane(0, -5)
@@ -341,10 +339,6 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			a.resetCursorBlink()
 			return false, a.forwardSessionKey(ev)
 		default:
-			if ev.Key() == tcell.KeyRune && ev.Rune() == 'q' {
-				a.requestQuit()
-				return false, nil
-			}
 			if ev.Key() == tcell.KeyRune && ev.Rune() == 'r' {
 				if a.reconnectCurrentSession(ctx) {
 					return false, nil
@@ -646,7 +640,7 @@ func (a *App) footerPrompt() string {
 		if a.workspace == nil {
 			return "HOST Enter/F7/F9 or LAYOUT Enter | F2 back | q/F10 quit"
 		}
-		return "F5 host | F7/F9 split | F8 close | F6/Alt move | F3/F4 layout | r reconn | q quit"
+		return "F2 back | F5 host | F7/F9 split | F8 close | F6/Alt move | F3/F4 layout | r reconn"
 	}
 	if a.inSFTPTab() {
 		if a.sftp == nil {
@@ -2363,7 +2357,7 @@ func tabIndexAt(x, y int, tabs []domain.DocumentKind) (int, bool) {
 	}
 	offset := 0
 	for idx, kind := range tabs {
-		label := " " + strings.ToUpper(string(kind)) + " "
+		label := " " + displayKindName(kind) + " "
 		if x >= offset && x < offset+len(label) {
 			return idx, true
 		}

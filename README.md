@@ -121,6 +121,7 @@ Inside the TUI WORKSPACE view:
 - `F7` splits the focused pane to the right, `F9` splits it downward, `F6` focuses the next pane, `Alt+Arrow` moves focus by direction, `Ctrl+Alt+Arrow` resizes the nearest split, and `F11` zooms/unzooms the focused pane
 - `F5` picks a host for the focused empty pane; pressing `Enter` on a pending pane connects it
 - `F4` saves the current split tree as a named `LAYOUT`; `F3` opens a saved layout, and saved layouts restore pane shape and host refs as pending connections
+- plain terminal keys, including arrow keys and `q`, are sent to the focused SSH pane; use `F2` or click a tab to leave `WORKSPACE`, and use `F10` to quit Nermius
 - closing an active pane or quitting while SSH resources are open asks for confirmation to avoid accidental disconnects
 - if an embedded SSH session disconnects unexpectedly, the TUI keeps the pane and scrollback, asks whether to reconnect, and retries up to 5 times after confirmation; press `r` on a disconnected pane to try again
 - use the mouse wheel to scroll local shell history
