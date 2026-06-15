@@ -262,6 +262,88 @@ func TestFooterPromptRefreshesForActiveView(t *testing.T) {
 	}
 }
 
+func TestLayoutTabUsesListNavigationAndQuit(t *testing.T) {
+	app := &App{
+		tabs: []domain.DocumentKind{
+			domain.KindHost,
+			domain.KindGroup,
+			domain.KindProfile,
+			domain.KindIdentity,
+			domain.KindKey,
+			domain.KindForward,
+			domain.KindWorkspace,
+			domain.KindKnownHost,
+		},
+		activeTab: 6,
+		records:   map[domain.DocumentKind][]store.DocumentSummary{},
+		filters:   map[domain.DocumentKind]string{},
+	}
+
+	if app.inSessionTab() {
+		t.Fatal("layout tab must not be treated as workspace session tab")
+	}
+	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModNone)); err != nil {
+		t.Fatalf("handleKey(left) returned error: %v", err)
+	}
+	if app.activeTab != 5 {
+		t.Fatalf("active tab after left = %d, want forward tab 5", app.activeTab)
+	}
+	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone)); err != nil {
+		t.Fatalf("handleKey(right) returned error: %v", err)
+	}
+	if app.activeTab != 6 {
+		t.Fatalf("active tab after right = %d, want layout tab 6", app.activeTab)
+	}
+	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+		t.Fatalf("handleKey(q) returned error: %v", err)
+	}
+	if !app.exitRequested {
+		t.Fatal("expected q on layout tab to request quit")
+	}
+}
+
+func TestWorkspaceTabPlainArrowsNavigateTabs(t *testing.T) {
+	app := &App{
+		tabs: []domain.DocumentKind{
+			domain.KindHost,
+			domain.KindGroup,
+			domain.KindProfile,
+			domain.KindIdentity,
+			domain.KindKey,
+			domain.KindForward,
+			domain.KindWorkspace,
+			domain.KindKnownHost,
+		},
+		activeTab:       8,
+		workspace:       newWorkspaceState(),
+		sessionRuntimes: map[*service.EmbeddedSession]*sessionRuntime{},
+	}
+
+	if !app.inSessionTab() {
+		t.Fatal("expected active tab to be workspace view")
+	}
+	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModNone)); err != nil {
+		t.Fatalf("handleKey(left) returned error: %v", err)
+	}
+	if app.activeTab != 7 {
+		t.Fatalf("active tab after left = %d, want known-host tab 7", app.activeTab)
+	}
+	app.setActiveTab(8)
+	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone)); err != nil {
+		t.Fatalf("handleKey(right) returned error: %v", err)
+	}
+	if app.activeTab != 9 {
+		t.Fatalf("active tab after right = %d, want sftp tab 9", app.activeTab)
+	}
+	app.setActiveTab(8)
+	if _, err := app.handleKey(nil, tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+		t.Fatalf("handleKey(q) returned error: %v", err)
+	}
+	if !app.exitRequested {
+		t.Fatal("expected q on workspace tab to request quit")
+	}
+}
+
 func TestWorkspaceSplitAndClose(t *testing.T) {
 	workspace := newWorkspaceState()
 	first := workspace.focused

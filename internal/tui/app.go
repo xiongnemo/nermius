@@ -303,8 +303,9 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 				a.focusWorkspaceDirection(-1, 0)
 				return false, nil
 			}
+			a.moveActiveTab(-1)
 			a.resetCursorBlink()
-			return false, a.forwardSessionKey(ev)
+			return false, nil
 		case tcell.KeyRight:
 			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
 				a.resizeFocusedWorkspacePane(5, 0)
@@ -314,8 +315,9 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 				a.focusWorkspaceDirection(1, 0)
 				return false, nil
 			}
+			a.moveActiveTab(1)
 			a.resetCursorBlink()
-			return false, a.forwardSessionKey(ev)
+			return false, nil
 		case tcell.KeyUp:
 			if ev.Modifiers()&tcell.ModAlt != 0 && ev.Modifiers()&tcell.ModCtrl != 0 {
 				a.resizeFocusedWorkspacePane(0, -5)
@@ -339,6 +341,10 @@ func (a *App) handleKey(ctx context.Context, ev *tcell.EventKey) (bool, error) {
 			a.resetCursorBlink()
 			return false, a.forwardSessionKey(ev)
 		default:
+			if ev.Key() == tcell.KeyRune && ev.Rune() == 'q' {
+				a.requestQuit()
+				return false, nil
+			}
 			if ev.Key() == tcell.KeyRune && ev.Rune() == 'r' {
 				if a.reconnectCurrentSession(ctx) {
 					return false, nil
