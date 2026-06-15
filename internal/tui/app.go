@@ -2013,7 +2013,13 @@ func (a *App) forwardSessionKey(ev *tcell.EventKey) error {
 	if session == nil {
 		return nil
 	}
-	payload := sessionKeyBytes(ev)
+	mode := termemu.ModeFlag(0)
+	if session.Terminal != nil {
+		session.Terminal.Lock()
+		mode = session.Terminal.Mode()
+		session.Terminal.Unlock()
+	}
+	payload := sessionKeyBytes(ev, mode)
 	if len(payload) == 0 {
 		return nil
 	}
@@ -2149,7 +2155,7 @@ func (a *App) handleLocalSelectionMouse(session *service.EmbeddedSession, ev *tc
 	}
 }
 
-func sessionKeyBytes(ev *tcell.EventKey) []byte {
+func sessionKeyBytes(ev *tcell.EventKey, mode termemu.ModeFlag) []byte {
 	switch ev.Key() {
 	case tcell.KeyEnter:
 		return []byte("\r")
@@ -2162,12 +2168,24 @@ func sessionKeyBytes(ev *tcell.EventKey) []byte {
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
 		return []byte{0x7f}
 	case tcell.KeyUp:
+		if mode&termemu.ModeAppCursor != 0 {
+			return []byte("\x1bOA")
+		}
 		return []byte("\x1b[A")
 	case tcell.KeyDown:
+		if mode&termemu.ModeAppCursor != 0 {
+			return []byte("\x1bOB")
+		}
 		return []byte("\x1b[B")
 	case tcell.KeyLeft:
+		if mode&termemu.ModeAppCursor != 0 {
+			return []byte("\x1bOD")
+		}
 		return []byte("\x1b[D")
 	case tcell.KeyRight:
+		if mode&termemu.ModeAppCursor != 0 {
+			return []byte("\x1bOC")
+		}
 		return []byte("\x1b[C")
 	case tcell.KeyHome:
 		return []byte("\x1b[H")

@@ -31,7 +31,7 @@ func TestSessionKeyBytesControlKeys(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sessionKeyBytes(tt.ev)
+			got := sessionKeyBytes(tt.ev, 0)
 			if !bytes.Equal(got, tt.want) {
 				t.Fatalf("sessionKeyBytes(%s) = %v, want %v", tt.name, got, tt.want)
 			}
@@ -40,10 +40,36 @@ func TestSessionKeyBytesControlKeys(t *testing.T) {
 }
 
 func TestSessionKeyBytesAltRune(t *testing.T) {
-	got := sessionKeyBytes(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModAlt))
+	got := sessionKeyBytes(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModAlt), 0)
 	want := []byte{0x1b, 'x'}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("sessionKeyBytes(alt-rune) = %v, want %v", got, want)
+	}
+}
+
+func TestSessionKeyBytesCursorMode(t *testing.T) {
+	tests := []struct {
+		name string
+		key  tcell.Key
+		mode termemu.ModeFlag
+		want []byte
+	}{
+		{name: "normal up", key: tcell.KeyUp, want: []byte("\x1b[A")},
+		{name: "normal down", key: tcell.KeyDown, want: []byte("\x1b[B")},
+		{name: "normal right", key: tcell.KeyRight, want: []byte("\x1b[C")},
+		{name: "normal left", key: tcell.KeyLeft, want: []byte("\x1b[D")},
+		{name: "app up", key: tcell.KeyUp, mode: termemu.ModeAppCursor, want: []byte("\x1bOA")},
+		{name: "app down", key: tcell.KeyDown, mode: termemu.ModeAppCursor, want: []byte("\x1bOB")},
+		{name: "app right", key: tcell.KeyRight, mode: termemu.ModeAppCursor, want: []byte("\x1bOC")},
+		{name: "app left", key: tcell.KeyLeft, mode: termemu.ModeAppCursor, want: []byte("\x1bOD")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionKeyBytes(tcell.NewEventKey(tt.key, 0, tcell.ModNone), tt.mode)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("sessionKeyBytes(%s) = %q, want %q", tt.name, string(got), string(tt.want))
+			}
+		})
 	}
 }
 
