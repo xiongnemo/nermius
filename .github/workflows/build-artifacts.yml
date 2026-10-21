@@ -176,7 +176,10 @@ jobs:
         if: matrix.libc == 'musl'
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.1
+          # 0.15 is the first release whose `zig cc` honours -dynamic for a
+          # cross-compiled musl target (ziglang/zig#23572); 0.14 links statically
+          # regardless.
+          version: 0.15.2
 
       - name: Build binary
         shell: bash
