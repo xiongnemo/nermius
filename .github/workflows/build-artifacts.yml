@@ -320,7 +320,14 @@ jobs:
           - { format: apk, image: "alpine:3.24", arch: armv6, platform: linux/arm/v6 }
           - { format: apk, image: "alpine:3.24", arch: armv7, platform: linux/arm/v7 }
           - { format: apk, image: "alpine:3.24", arch: riscv64, platform: linux/riscv64 }
-          - { format: apk, image: "alpine:3.24", arch: loong64, platform: linux/loong64 }
+          # The alpine image on Docker Hub has no loong64 variant; Alpine's own
+          # minirootfs does, so that is imported instead.
+          - format: apk
+            image: "alpine:3.24"
+            arch: loong64
+            platform: linux/loong64
+            rootfs: https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/loongarch64/alpine-minirootfs-3.24.2-loongarch64.tar.gz
+            rootfs_sha256: 6ce402ec4dfac1a139a1e62bef5b473b1eb966d956747c7e9cd977d36efe618d
           - { format: ipk, image: "openwrt/rootfs:x86-64-v24.10.8", arch: amd64, platform: linux/amd64 }
           - { format: deb, image: "debian:stable", arch: amd64, platform: linux/amd64 }
           - { format: rpm, image: "fedora:latest", arch: amd64, platform: linux/amd64 }
@@ -338,10 +345,19 @@ jobs:
         shell: bash
         env:
           FORMAT: ${{ matrix.format }}
+          IMAGE: ${{ matrix.image }}
+          ROOTFS: ${{ matrix.rootfs }}
+          ROOTFS_SHA256: ${{ matrix.rootfs_sha256 }}
         run: |
           set -euo pipefail
           ls -l pkg
-          docker run --rm --platform "${{ matrix.platform }}" -e FORMAT -v "$PWD/pkg:/pkg:ro" "${{ matrix.image }}" sh -euc '
+          if [ -n "${ROOTFS}" ]; then
+            curl -fsSLo rootfs.tar.gz "$ROOTFS"
+            echo "${ROOTFS_SHA256}  rootfs.tar.gz" | sha256sum -c -
+            IMAGE=local/rootfs:smoke
+            docker import --platform "${{ matrix.platform }}" rootfs.tar.gz "$IMAGE"
+          fi
+          docker run --rm --platform "${{ matrix.platform }}" -e FORMAT -v "$PWD/pkg:/pkg:ro" "$IMAGE" sh -euc '
             case "$FORMAT" in
               apk) apk add --no-cache --allow-untrusted /pkg/*.apk ;;
               ipk) mkdir -p /var/lock && opkg install /pkg/*.ipk ;;
