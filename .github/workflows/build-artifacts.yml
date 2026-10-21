@@ -89,7 +89,32 @@ jobs:
                   "archive": archive,
               })
 
-          linux_arches = [target["arch"] for target in build_targets if target["goos"] == "linux"]
+          # Alpine and OpenWrt are musl systems, and a plain linux build cannot
+          # start on them: go-nativeclipboard reaches libc through purego, whose
+          # fakecgo links glibc dynamically even with cgo off. These targets are
+          # built with real cgo against musl, cross-compiled by zig, and the apk
+          # and ipk packages are made from them.
+          musl_zig_targets = {
+              "386": "x86-linux-musl",
+              "amd64": "x86_64-linux-musl",
+              "armv6": "arm-linux-musleabihf",
+              "armv7": "arm-linux-musleabihf",
+              "arm64": "aarch64-linux-musl",
+              "loong64": "loongarch64-linux-musl",
+              "riscv64": "riscv64-linux-musl",
+          }
+          for target in [t for t in build_targets if t["goos"] == "linux" and t["arch"] in musl_zig_targets]:
+              artifact = f"{binary_name}-linux-musl-{target['arch']}"
+              build_targets.append({
+                  **target,
+                  "target": f"linux-musl/{target['arch']}",
+                  "libc": "musl",
+                  "zig_target": musl_zig_targets[target["arch"]],
+                  "artifact": artifact,
+                  "archive": f"{artifact}.tar.gz",
+              })
+
+          linux_arches = [target["arch"] for target in build_targets if target["goos"] == "linux" and target.get("libc") != "musl"]
           linux_arch_set = set(linux_arches)
           package_arches = {
               "deb": {"386", "amd64", "armv7", "arm64", "riscv64"},
@@ -116,12 +141,13 @@ jobs:
                   if arch not in package_arches[packager]:
                       continue
                   extension = package_extensions[packager]
+                  libc = "musl-" if packager in ("apk", "ipk") else ""
                   package_targets.append({
                       "packager": packager,
                       "arch": arch,
                       "nfpm_arch": nfpm_arches.get(arch, arch),
                       "extension": extension,
-                      "source_artifact": f"{binary_name}-linux-{arch}",
+                      "source_artifact": f"{binary_name}-linux-{libc}{arch}",
                       "asset": f"{binary_name}-linux-{arch}.{extension}",
                   })
 
@@ -146,6 +172,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Set up zig
+        if: matrix.libc == 'musl'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
       - name: Build binary
         shell: bash
         env:
@@ -155,6 +187,8 @@ jobs:
           EXT: ${{ matrix.ext }}
           ARTIFACT: ${{ matrix.artifact }}
           ARCHIVE: ${{ matrix.archive }}
+          LIBC: ${{ matrix.libc }}
+          ZIG_TARGET: ${{ matrix.zig_target }}
         run: |
           mkdir -p dist
           output="${ARTIFACT}${EXT}"
@@ -183,8 +217,20 @@ jobs:
             "-X"
             "github.com/nermius/nermius/internal/buildinfo.buildTime=${build_time}"
           )
+          if [ "${LIBC}" = "musl" ]; then
+            # Go's internal linker would stamp glibc's interpreter onto the binary;
+            # linking externally through zig is what makes it ld-musl.
+            export CGO_ENABLED=1 CC="zig cc -target ${ZIG_TARGET}" CXX="zig c++ -target ${ZIG_TARGET}"
+            ldflags+=("-linkmode" "external")
+          fi
           echo "Building ${base_version}-${branch}-${commit}"
           go build -trimpath -ldflags="${ldflags[*]}" -o "dist/${output}" .
+          if [ "${LIBC}" = "musl" ]; then
+            readelf -l "dist/${output}" > elf-headers.txt
+            grep -i interpreter elf-headers.txt
+            grep -q 'interpreter: /lib/ld-musl-' elf-headers.txt
+            readelf -d "dist/${output}" | grep NEEDED
+          fi
           sha256sum "dist/${output}" > "dist/${output}.sha256"
           tar -C dist -czf "dist/${ARCHIVE}" "${output}" "${output}.sha256"
 
@@ -251,11 +297,62 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Installs packages the way a user would and runs them. The apk and ipk
+  # checks are the point: those systems are musl, and the published apk once
+  # shipped a glibc binary that installed cleanly and then could not start.
+  # Foreign architectures run under QEMU; the binary only has to start.
+  package-smoke:
+    name: Smoke ${{ matrix.format }} on ${{ matrix.image }} (${{ matrix.arch }})
+    needs: package
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { format: apk, image: "alpine:3.21", arch: amd64, platform: linux/amd64 }
+          - { format: apk, image: "alpine:3.24", arch: amd64, platform: linux/amd64 }
+          - { format: apk, image: "alpine:3.24", arch: arm64, platform: linux/arm64 }
+          - { format: apk, image: "alpine:3.24", arch: "386", platform: linux/386 }
+          - { format: apk, image: "alpine:3.24", arch: armv6, platform: linux/arm/v6 }
+          - { format: apk, image: "alpine:3.24", arch: armv7, platform: linux/arm/v7 }
+          - { format: apk, image: "alpine:3.24", arch: riscv64, platform: linux/riscv64 }
+          - { format: apk, image: "alpine:3.24", arch: loong64, platform: linux/loong64 }
+          - { format: ipk, image: "openwrt/rootfs:x86-64-v24.10.8", arch: amd64, platform: linux/amd64 }
+          - { format: deb, image: "debian:stable", arch: amd64, platform: linux/amd64 }
+          - { format: rpm, image: "fedora:latest", arch: amd64, platform: linux/amd64 }
+    steps:
+      - name: Set up QEMU
+        if: matrix.arch != 'amd64' && matrix.arch != 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-${{ matrix.format }}-${{ matrix.arch }}
+          path: pkg
+
+      - name: Install and run
+        shell: bash
+        env:
+          FORMAT: ${{ matrix.format }}
+        run: |
+          set -euo pipefail
+          ls -l pkg
+          docker run --rm --platform "${{ matrix.platform }}" -e FORMAT -v "$PWD/pkg:/pkg:ro" "${{ matrix.image }}" sh -euc '
+            case "$FORMAT" in
+              apk) apk add --no-cache --allow-untrusted /pkg/*.apk ;;
+              ipk) mkdir -p /var/lock && opkg install /pkg/*.ipk ;;
+              deb) apt-get update -qq && apt-get install -y -qq /pkg/*.deb ;;
+              rpm) dnf install -y -q /pkg/*.rpm ;;
+            esac
+            nermius version
+          '
+
   prerelease:
     name: Publish Dev Prerelease
     needs:
       - build
       - package
+      - package-smoke
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     permissions:
