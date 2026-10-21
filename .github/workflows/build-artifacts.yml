@@ -218,16 +218,17 @@ jobs:
             "github.com/nermius/nermius/internal/buildinfo.buildTime=${build_time}"
           )
           if [ "${LIBC}" = "musl" ]; then
-            # Go's internal linker would stamp glibc's interpreter onto the binary;
-            # linking externally through zig is what makes it ld-musl.
+            # Go's internal linker would stamp glibc's interpreter onto the binary,
+            # so zig links it. zig links musl statically unless told otherwise, and
+            # a static binary cannot dlopen the X11 libraries the clipboard needs.
             export CGO_ENABLED=1 CC="zig cc -target ${ZIG_TARGET}" CXX="zig c++ -target ${ZIG_TARGET}"
-            ldflags+=("-linkmode" "external")
+            ldflags+=("-linkmode" "external" "-extldflags" "-dynamic")
           fi
           echo "Building ${base_version}-${branch}-${commit}"
           go build -trimpath -ldflags="${ldflags[*]}" -o "dist/${output}" .
           if [ "${LIBC}" = "musl" ]; then
             readelf -l "dist/${output}" > elf-headers.txt
-            grep -i interpreter elf-headers.txt
+            grep -i interpreter elf-headers.txt || { echo "no ELF interpreter: the binary is static"; exit 1; }
             grep -q 'interpreter: /lib/ld-musl-' elf-headers.txt
             readelf -d "dist/${output}" | grep NEEDED
           fi
