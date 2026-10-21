@@ -208,6 +208,8 @@ sudo opkg install nermius-linux-amd64.ipk
 
 These packages install `nermius` to `/usr/bin/nermius`. Release assets do not include apt, yum, apk, pacman, or opkg repository indexes yet.
 
+The `.apk` and `.ipk` packages carry a musl build, because Alpine and OpenWrt are musl systems: the clipboard support reaches libc through purego, which links the glibc binary dynamically even without cgo, so the plain Linux build cannot start there. The same musl builds are published as `nermius-linux-musl-<arch>.tar.gz`.
+
 ## Vault Security
 
 `vault init` still bootstraps the vault with a master password. That master password derives a KEK which wraps the random `vaultKey`; the `vaultKey` is what encrypts the actual vault records.
