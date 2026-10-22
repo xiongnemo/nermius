@@ -8,3 +8,4 @@ This repository uses the following working rules:
    If there is no dedicated completion source file, inspect the Cobra-generated `completion` subcommand wiring and behavior instead.
 4. After finishing a single feature or fixing a bug, create a commit for that unit of work.
 5. Versioning uses `VERSION` as the epoch file. CI computes the effective base version as `VERSION`'s major/minor plus `VERSION`'s patch plus the number of commits since `VERSION` was last changed. Do not manually bump patch for every commit; to reset patch after changing major/minor, edit `VERSION` to the new epoch version in that change.
+   Pushes to `dev` publish dev prereleases (`vX.Y.Z-dev-<commit12>`, packaged as `X.Y.Z~pre-1`). To publish a release, push the exact tag CI computes for that commit, `vX.Y.Z`; it builds bare (binary, release and packages) and CI refuses any other tag. Run Build Artifacts by hand with `rehearse_release` to check a release before tagging.

@@ -206,7 +206,7 @@ sudo pacman -U nermius-linux-amd64.pkg.tar.zst
 sudo opkg install nermius-linux-amd64.ipk
 ```
 
-These packages install `nermius` to `/usr/bin/nermius`. Release assets do not include apt, yum, apk, pacman, or opkg repository indexes yet.
+These packages install `nermius` to `/usr/bin/nermius`. apt, dnf and apk users can install them from [package.anzupop.com](https://package.anzupop.com) instead. Dev prereleases are packaged as `X.Y.Z~pre-1` (apk `X.Y.Z_pre-r1`); a release, published by pushing its exact `vX.Y.Z` tag, as `X.Y.Z-1`.
 
 The `.apk` and `.ipk` packages carry a musl build, because Alpine and OpenWrt are musl systems: the clipboard support reaches libc through purego, which links the glibc binary dynamically even without cgo, so the plain Linux build cannot start there. The same musl builds are published as `nermius-linux-musl-<arch>.tar.gz`.
 

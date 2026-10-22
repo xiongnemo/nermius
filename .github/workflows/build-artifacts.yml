@@ -1,13 +1,22 @@
 name: Build Artifacts
 
+# A push to `dev` publishes a dev prerelease; pushing an exact vMAJOR.MINOR.PATCH
+# tag that matches the version VERSION computes publishes it as a release.
+# `rehearse_release` builds, packages and smoke-tests a release of the current
+# commit without publishing anything.
 on:
   push:
     branches:
       - dev
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
   pull_request:
   workflow_dispatch:
+    inputs:
+      rehearse_release:
+        description: Build this commit as a release (nothing is published)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,6 +33,9 @@ jobs:
     outputs:
       build_matrix: ${{ steps.generate.outputs.build_matrix }}
       package_matrix: ${{ steps.generate.outputs.package_matrix }}
+      base_version: ${{ steps.version.outputs.base_version }}
+      tag: ${{ steps.version.outputs.tag }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,6 +45,34 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      # The one place the version is computed; every later job reads it from
+      # here, so a binary, its packages and its release cannot disagree. A tag
+      # build is the release and renders bare, but only if the tag is the version
+      # VERSION computes for its commit -- otherwise there would be two versions.
+      - id: version
+        name: Compute version
+        shell: bash
+        env:
+          REHEARSE_RELEASE: ${{ inputs.rehearse_release || false }}
+        run: |
+          set -euo pipefail
+          eval "$(bash scripts/compute-version.sh)"
+          release=false
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "${base_version}" ]; then
+              echo "tag ${GITHUB_REF_NAME} is not the version VERSION computes for this commit, ${base_version}" >&2
+              exit 1
+            fi
+            release=true
+          elif [ "${REHEARSE_RELEASE}" = "true" ]; then
+            release=true
+          fi
+          if [ "$release" = "true" ]; then tag="${base_version}"; else tag="${base_version}-dev-${GITHUB_SHA::12}"; fi
+          echo "base_version=${base_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+          echo "${tag} (release=${release})"
 
       - id: generate
         name: Generate target matrices
@@ -192,10 +232,12 @@ jobs:
           ARCHIVE: ${{ matrix.archive }}
           LIBC: ${{ matrix.libc }}
           ZIG_TARGET: ${{ matrix.zig_target }}
+          BASE_VERSION: ${{ needs.targets.outputs.base_version }}
+          RELEASE: ${{ needs.targets.outputs.release }}
         run: |
           mkdir -p dist
           output="${ARTIFACT}${EXT}"
-          eval "$(bash scripts/compute-version.sh)"
+          base_version="${BASE_VERSION}"
           branch="$(git rev-parse --abbrev-ref HEAD)"
           if [ "$branch" = "HEAD" ]; then
             branch="detached"
@@ -204,6 +246,10 @@ jobs:
           dirty="false"
           if ! git diff --quiet --ignore-submodules HEAD --; then
             dirty="true"
+          fi
+          if [ "${RELEASE}" = "true" ] && [ "$dirty" = "true" ]; then
+            echo "a release must be built from a clean tree" >&2
+            exit 1
           fi
           build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ldflags=(
@@ -219,6 +265,8 @@ jobs:
             "github.com/nermius/nermius/internal/buildinfo.gitDirty=${dirty}"
             "-X"
             "github.com/nermius/nermius/internal/buildinfo.buildTime=${build_time}"
+            "-X"
+            "github.com/nermius/nermius/internal/buildinfo.gitRelease=${RELEASE}"
           )
           if [ "${LIBC}" = "musl" ]; then
             # Go's internal linker would stamp glibc's interpreter onto the binary,
@@ -282,13 +330,18 @@ jobs:
           SOURCE_ARTIFACT: ${{ matrix.source_artifact }}
           ASSET: ${{ matrix.asset }}
           NFPM_ARCH: ${{ matrix.nfpm_arch }}
+          BASE_VERSION: ${{ needs.targets.outputs.base_version }}
+          RELEASE: ${{ needs.targets.outputs.release }}
         run: |
           mkdir -p dist/package-input dist/packages
           tar -xzf "dist/artifacts/${SOURCE_ARTIFACT}.tar.gz" -C dist/package-input
           binary_path="dist/package-input/${SOURCE_ARTIFACT}"
           chmod 0755 "${binary_path}"
-          eval "$(bash scripts/compute-version.sh)"
-          export NFPM_VERSION="${base_version#v}"
+          # A release is packaged as its version. A dev build is a prerelease of
+          # it, 0.0.31~pre-1 (apk 0.0.31_pre-r1), so the release that follows
+          # from the same commit sorts above it instead of colliding with it.
+          export NFPM_VERSION="${BASE_VERSION#v}"
+          if [ "${RELEASE}" != "true" ]; then NFPM_VERSION="${NFPM_VERSION}-pre"; fi
           export NFPM_ARCH
           export NFPM_BINARY="${PWD}/${binary_path}"
           nfpm package --config nfpm.yaml --packager "${PACKAGER}" --target "dist/packages/${ASSET}"
@@ -367,13 +420,14 @@ jobs:
             nermius version
           '
 
-  prerelease:
-    name: Publish Dev Prerelease
+  publish:
+    name: Publish ${{ needs.targets.outputs.release == 'true' && 'Release' || 'Dev Prerelease' }}
     needs:
+      - targets
       - build
       - package
       - package-smoke
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -389,22 +443,33 @@ jobs:
           merge-multiple: true
 
       - id: meta
-        name: Compute prerelease metadata
+        name: Compute release metadata
         shell: bash
+        env:
+          RELEASE: ${{ needs.targets.outputs.release }}
+          TAG: ${{ needs.targets.outputs.tag }}
         run: |
-          eval "$(bash scripts/compute-version.sh)"
-          short_sha="${GITHUB_SHA::12}"
-          tag="${base_version}-dev-${short_sha}"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "name=Dev prerelease ${tag}" >> "$GITHUB_OUTPUT"
-          echo "base_version=${base_version}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if [ "${RELEASE}" = "true" ]; then
+            echo "name=nermius ${TAG}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "headline=Release ${TAG}." >> "$GITHUB_OUTPUT"
+          else
+            echo "name=Dev prerelease ${TAG}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "channel=nightly" >> "$GITHUB_OUTPUT"
+            echo "headline=Automated prerelease build from \`dev\`." >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.name }}
-          prerelease: true
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          make_latest: ${{ steps.meta.outputs.prerelease == 'false' }}
           generate_release_notes: true
           files: |
             dist/*.tar.gz
@@ -414,9 +479,9 @@ jobs:
             dist/*.ipk
             dist/*.pkg.tar.zst
           body: |
-            Automated prerelease build from `dev`.
-            
-            Version: `${{ steps.meta.outputs.base_version }}`
+            ${{ steps.meta.outputs.headline }}
+
+            Version: `${{ needs.targets.outputs.base_version }}`
             Commit: `${{ github.sha }}`
 
       # The package repository fetches this release by tag and hashes the assets
@@ -438,6 +503,6 @@ jobs:
             -f event_type=release-published \
             -f "client_payload[repository]=${GITHUB_REPOSITORY}" \
             -f "client_payload[tag]=${TAG}" \
-            -f "client_payload[channel]=nightly" \
+            -f "client_payload[channel]=${{ steps.meta.outputs.channel }}" \
             -f "client_payload[sha]=${GITHUB_SHA}" \
             || echo "::warning title=Package repository not notified::dispatch to ${PACKAGES_REPO} failed; its scheduled sweep is the backstop."
