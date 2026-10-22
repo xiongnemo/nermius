@@ -16,6 +16,9 @@ var (
 	gitCommit   string
 	gitDirty    string
 	buildTime   string
+	// gitRelease marks a build of exactly a vX.Y.Z tag. That build is the
+	// release, so its version renders bare, as the tag and packages do.
+	gitRelease string
 )
 
 type Info struct {
@@ -43,7 +46,7 @@ func Current() Info {
 
 	return Info{
 		BaseVersion: base,
-		Version:     formatVersion(base, branch, commit, dirty),
+		Version:     formatVersion(base, branch, commit, dirty, parseDirty(gitRelease)),
 		Branch:      branch,
 		Commit:      commit,
 		BuildTime:   build,
@@ -51,8 +54,11 @@ func Current() Info {
 	}
 }
 
-func formatVersion(base, branch, commit string, dirty bool) string {
-	version := firstNonEmpty(base, BaseVersion) + "-" + firstNonEmpty(branch, "unknown") + "-" + firstNonEmpty(commit, "unknown")
+func formatVersion(base, branch, commit string, dirty, release bool) string {
+	version := firstNonEmpty(base, BaseVersion)
+	if !release {
+		version += "-" + firstNonEmpty(branch, "unknown") + "-" + firstNonEmpty(commit, "unknown")
+	}
 	if dirty {
 		version += "-dirty"
 	}
