@@ -74,3 +74,25 @@ func TestBranchFromGitPathFile(t *testing.T) {
 		t.Fatalf("branchFromGitPath(file) = %q", got)
 	}
 }
+
+func TestCurrentRendersReleaseBuildBare(t *testing.T) {
+	originalBase, originalBranch, originalCommit, originalDirty, originalRelease := baseVersion, gitBranch, gitCommit, gitDirty, gitRelease
+	defer func() {
+		baseVersion, gitBranch, gitCommit, gitDirty, gitRelease = originalBase, originalBranch, originalCommit, originalDirty, originalRelease
+	}()
+
+	baseVersion = "v0.1.0"
+	gitBranch = "v0.1.0"
+	gitCommit = "0123456789abcdef"
+	gitDirty = "false"
+	gitRelease = "true"
+
+	if got := Current().Version; got != "v0.1.0" {
+		t.Fatalf("release Version = %q, want %q", got, "v0.1.0")
+	}
+
+	gitDirty = "true"
+	if got := Current().Version; got != "v0.1.0-dirty" {
+		t.Fatalf("dirty release Version = %q, want %q", got, "v0.1.0-dirty")
+	}
+}
