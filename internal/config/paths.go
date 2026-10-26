@@ -4,12 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
 const (
 	AppName            = "nermius"
+	DefaultDataDirName = ".nermius"
 	DefaultVaultName   = "vault.db"
 	DefaultSessionName = "session.json"
 )
@@ -20,38 +20,65 @@ type Paths struct {
 	VaultPath      string
 	SessionPath    string
 	KnownHostsPath string
+
+	// Legacy paths are populated only for the default-path layout. They let
+	// vault migration find data written by older releases without making
+	// ordinary commands silently open or create a different vault.
+	LegacyConfigDir   string
+	LegacyCacheDir    string
+	LegacyVaultPath   string
+	LegacySessionPath string
+	VaultOverride     bool
 }
 
 func ResolvePaths(vaultOverride string) (Paths, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return Paths{}, err
-	}
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return Paths{}, err
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Paths{}, err
 	}
-	appConfig := filepath.Join(configDir, AppName)
-	appCache := filepath.Join(cacheDir, AppName)
+	appConfig := filepath.Join(home, DefaultDataDirName)
+	appCache := filepath.Join(appConfig, "cache")
 	vaultPath := filepath.Join(appConfig, DefaultVaultName)
-	if strings.TrimSpace(vaultOverride) != "" {
+	override := strings.TrimSpace(vaultOverride) != ""
+	if override {
 		vaultPath = ExpandUser(vaultOverride)
 	}
-	knownHostsPath := filepath.Join(home, ".ssh", "known_hosts")
-	if runtime.GOOS == "windows" {
-		knownHostsPath = filepath.Join(home, ".ssh", "known_hosts")
+	legacyConfig, legacyCache := legacyDirs()
+	legacyVaultPath := ""
+	legacySessionPath := ""
+	if legacyConfig != "" {
+		legacyVaultPath = filepath.Join(legacyConfig, DefaultVaultName)
 	}
+	if legacyCache != "" {
+		legacySessionPath = filepath.Join(legacyCache, DefaultSessionName)
+	}
+	knownHostsPath := filepath.Join(home, ".ssh", "known_hosts")
 	return Paths{
-		ConfigDir:      appConfig,
-		CacheDir:       appCache,
-		VaultPath:      vaultPath,
-		SessionPath:    filepath.Join(appCache, DefaultSessionName),
-		KnownHostsPath: knownHostsPath,
+		ConfigDir:         appConfig,
+		CacheDir:          appCache,
+		VaultPath:         vaultPath,
+		SessionPath:       filepath.Join(appCache, DefaultSessionName),
+		KnownHostsPath:    knownHostsPath,
+		LegacyConfigDir:   legacyConfig,
+		LegacyCacheDir:    legacyCache,
+		LegacyVaultPath:   legacyVaultPath,
+		LegacySessionPath: legacySessionPath,
+		VaultOverride:     override,
 	}, nil
+}
+
+func legacyDirs() (string, string) {
+	configBase, _ := os.UserConfigDir()
+	cacheBase, _ := os.UserCacheDir()
+	legacyConfig := ""
+	legacyCache := ""
+	if strings.TrimSpace(configBase) != "" {
+		legacyConfig = filepath.Join(configBase, AppName)
+	}
+	if strings.TrimSpace(cacheBase) != "" {
+		legacyCache = filepath.Join(cacheBase, AppName)
+	}
+	return legacyConfig, legacyCache
 }
 
 func EnsureLayout(paths Paths) error {

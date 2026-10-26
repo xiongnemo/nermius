@@ -99,7 +99,15 @@ Normal read/write commands now auto-unlock:
 - first via the enrolled system keychain backend
 - otherwise by prompting for the master password
 
-There is no plaintext local session file anymore. On migrated/current vaults, object bodies and secrets are stored in encrypted `records`; legacy vaults must be upgraded explicitly with `nermius vault migrate`.
+Nermius-owned local state uses one home-directory root by default:
+
+```text
+~/.nermius/vault.db
+~/.nermius/cache/session.json
+~/.nermius/cache/keychain/<vault-id>.bin
+```
+
+The default file-backed OpenSSH known-hosts fallback remains `~/.ssh/known_hosts` for interoperability. An explicit `--vault PATH` still uses the path supplied by the caller. There is no plaintext local session file anymore. On migrated/current vaults, object bodies and secrets are stored in encrypted `records`; legacy vaults must be upgraded explicitly with `nermius vault migrate`.
 
 Inside the TUI object tabs:
 
@@ -155,7 +163,7 @@ nermius known-host list
 nermius connect my-host
 ```
 
-If you created a vault with an older Nermius build, migrate it once before using regular commands:
+If you created a vault with an older Nermius build, migrate its schema and default location once before using regular commands:
 
 ```powershell
 nermius vault migrate
@@ -237,7 +245,7 @@ Behavior notes:
 - if keychain unlock fails but the master password unlocks the vault, interactive CLI commands explain the keychain failure and offer to disable that local enrollment. This is equivalent to running `nermius vault keychain disable`; it does not rewrite vault records or remove master-password access.
 - a malicious same-user process may still invoke Nermius or Windows APIs and cause an OS authorization prompt, deny access by deleting local key material, or wait for the user to approve a prompt. The strong mode is meant to prevent silent vault-key unwrap, not to defend against a fully compromised user session.
 - current-schema vaults use whole-vault encrypted records, so hostnames, usernames, labels, known-host payloads, and secrets are no longer stored as plaintext rows in SQLite.
-- `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault.
+- `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault. When it finds a vault at the old OS-specific default location, it copies the vault and local session/keychain sidecars into `~/.nermius`, then archives the old files with `.bak.pre-location`. Regular commands refuse to create a new empty default vault while the old location still exists. If both locations contain a vault, resolve the duplicate explicitly with `--vault` before migrating.
 
 ### Moving A Vault To Another Machine
 
@@ -249,7 +257,7 @@ The SQLite vault file is portable. The system keychain enrollment is not portabl
    nermius vault keychain status
    ```
 
-   The default path is usually `%APPDATA%\nermius\vault.db` on Windows, `~/Library/Application Support/nermius/vault.db` on macOS, and `~/.config/nermius/vault.db` on Linux.
+   The default path is `~/.nermius/vault.db` on every platform. Older builds may have used an OS-specific config directory; run `nermius vault migrate` before normal commands so the old location is detected and moved safely.
 
 2. Copy `vault.db` to the new machine.
 

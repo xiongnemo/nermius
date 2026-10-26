@@ -465,6 +465,145 @@ func TestMigrateVaultMovesLegacyDataIntoEncryptedRecords(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsLegacyDefaultVault(t *testing.T) {
+	temp := t.TempDir()
+	current := filepath.Join(temp, "home", ".nermius", "vault.db")
+	legacy := filepath.Join(temp, "old-config", "nermius", "vault.db")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	manager := NewVaultManager(config.Paths{
+		ConfigDir:       filepath.Dir(current),
+		CacheDir:        filepath.Join(temp, "home", ".nermius", "cache"),
+		VaultPath:       current,
+		SessionPath:     filepath.Join(temp, "home", ".nermius", "cache", "session.json"),
+		KnownHostsPath:  filepath.Join(temp, "home", ".ssh", "known_hosts"),
+		LegacyVaultPath: legacy,
+	})
+	if _, err := manager.Open(context.Background()); err == nil || !strings.Contains(err.Error(), "vault migrate") {
+		t.Fatalf("Open error = %v, want legacy-location migration guidance", err)
+	}
+}
+
+func TestMigrateVaultRelocatesLegacyDefaultVault(t *testing.T) {
+	ctx := context.Background()
+	temp := t.TempDir()
+	legacyConfig := filepath.Join(temp, "old-config", "nermius")
+	legacyCache := filepath.Join(temp, "old-cache", "nermius")
+	legacyVault := filepath.Join(legacyConfig, "vault.db")
+	legacySession := filepath.Join(legacyCache, "session.json")
+	legacyKeychain := filepath.Join(legacyCache, "keychain")
+	currentConfig := filepath.Join(temp, "home", ".nermius")
+	currentCache := filepath.Join(currentConfig, "cache")
+	currentVault := filepath.Join(currentConfig, "vault.db")
+	currentSession := filepath.Join(currentCache, "session.json")
+	currentKeychain := filepath.Join(currentCache, "keychain")
+
+	legacyManager := NewVaultManager(config.Paths{
+		ConfigDir:      legacyConfig,
+		CacheDir:       legacyCache,
+		VaultPath:      legacyVault,
+		SessionPath:    legacySession,
+		KnownHostsPath: filepath.Join(temp, "old-home", ".ssh", "known_hosts"),
+		VaultOverride:  true,
+	})
+	if err := legacyManager.Init(ctx, "master-pass"); err != nil {
+		t.Fatalf("legacy Init failed: %v", err)
+	}
+	legacyDB, err := legacyManager.Open(ctx)
+	if err != nil {
+		t.Fatalf("legacy Open failed: %v", err)
+	}
+	hostBody, err := json.Marshal(domain.Host{ID: "relocated-host", Title: "relocated", Hostname: "relocated.example.com"})
+	if err != nil {
+		t.Fatalf("Marshal host failed: %v", err)
+	}
+	if err := legacyDB.PutLegacyDocument(ctx, store.DocumentRecord{
+		ID:   "relocated-host",
+		Kind: string(domain.KindHost),
+		Body: hostBody,
+	}); err != nil {
+		t.Fatalf("PutLegacyDocument failed: %v", err)
+	}
+	if err := legacyDB.DeleteMeta(ctx, metaSchemaVersion); err != nil {
+		t.Fatalf("DeleteMeta(schema) failed: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("legacy Close failed: %v", err)
+	}
+	if err := os.WriteFile(legacySession, []byte("session"), 0o600); err != nil {
+		t.Fatalf("WriteFile session failed: %v", err)
+	}
+	if err := os.MkdirAll(legacyKeychain, 0o700); err != nil {
+		t.Fatalf("MkdirAll keychain failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyKeychain, "vault-id.bin"), []byte("protected"), 0o600); err != nil {
+		t.Fatalf("WriteFile keychain failed: %v", err)
+	}
+
+	manager := NewVaultManager(config.Paths{
+		ConfigDir:         currentConfig,
+		CacheDir:          currentCache,
+		VaultPath:         currentVault,
+		SessionPath:       currentSession,
+		KnownHostsPath:    filepath.Join(temp, "home", ".ssh", "known_hosts"),
+		LegacyConfigDir:   legacyConfig,
+		LegacyCacheDir:    legacyCache,
+		LegacyVaultPath:   legacyVault,
+		LegacySessionPath: legacySession,
+	})
+	if err := manager.MigrateVault(ctx, func(label string) (string, error) {
+		if label != "Master password" {
+			t.Fatalf("unexpected password prompt %q", label)
+		}
+		return "master-pass", nil
+	}); err != nil {
+		t.Fatalf("MigrateVault failed: %v", err)
+	}
+	if _, err := os.Stat(currentVault); err != nil {
+		t.Fatalf("current vault missing: %v", err)
+	}
+	if _, err := os.Stat(legacyVault + ".bak.pre-location"); err != nil {
+		t.Fatalf("legacy vault archive missing: %v", err)
+	}
+	if _, err := os.Stat(currentSession); err != nil {
+		t.Fatalf("current session missing: %v", err)
+	}
+	if _, err := os.Stat(legacySession + ".bak.pre-location"); err != nil {
+		t.Fatalf("legacy session archive missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(currentKeychain, "vault-id.bin")); err != nil {
+		t.Fatalf("current keychain sidecar missing: %v", err)
+	}
+	if _, err := os.Stat(legacyKeychain + ".bak.pre-location"); err != nil {
+		t.Fatalf("legacy keychain archive missing: %v", err)
+	}
+	if _, err := os.Stat(currentVault + ".bak.pre-schema-v2"); err != nil {
+		t.Fatalf("schema migration backup missing: %v", err)
+	}
+
+	db, err := manager.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open after relocation failed: %v", err)
+	}
+	key, err := manager.unwrapVaultKey(ctx, db, "master-pass")
+	if err != nil {
+		t.Fatalf("unwrap relocated vault key failed: %v", err)
+	}
+	defer zeroBytes(key)
+	legacyHost, err := NewCatalog(db, key).GetHost(ctx, "relocated-host")
+	if err != nil {
+		t.Fatalf("GetHost after relocation failed: %v", err)
+	}
+	if legacyHost.Hostname != "relocated.example.com" {
+		t.Fatalf("unexpected relocated host: %+v", legacyHost)
+	}
+	_ = db.Close()
+}
+
 type fakeUnlockStore struct {
 	available     bool
 	kind          string

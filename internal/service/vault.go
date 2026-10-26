@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -35,10 +37,17 @@ func NewVaultManager(paths config.Paths) *VaultManager {
 }
 
 func (m *VaultManager) Open(ctx context.Context) (*store.Store, error) {
+	if err := m.rejectLegacyDefaultVault(); err != nil {
+		return nil, err
+	}
+	return m.openAt(ctx, m.Paths.VaultPath)
+}
+
+func (m *VaultManager) openAt(ctx context.Context, path string) (*store.Store, error) {
 	if err := config.EnsureLayout(m.Paths); err != nil {
 		return nil, err
 	}
-	db, err := store.Open(m.Paths.VaultPath)
+	db, err := store.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -47,6 +56,27 @@ func (m *VaultManager) Open(ctx context.Context) (*store.Store, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+func (m *VaultManager) rejectLegacyDefaultVault() error {
+	if m.Paths.VaultOverride || m.Paths.LegacyVaultPath == "" || samePath(m.Paths.VaultPath, m.Paths.LegacyVaultPath) {
+		return nil
+	}
+	current, err := pathExists(m.Paths.VaultPath)
+	if err != nil {
+		return err
+	}
+	legacy, err := pathExists(m.Paths.LegacyVaultPath)
+	if err != nil {
+		return err
+	}
+	if !legacy {
+		return nil
+	}
+	if current {
+		return fmt.Errorf("both the current vault %q and legacy vault %q exist; choose one with --vault or run `nermius vault migrate` after resolving the duplicate", m.Paths.VaultPath, m.Paths.LegacyVaultPath)
+	}
+	return fmt.Errorf("vault found at legacy location %q; run `nermius vault migrate` to move it to %q", m.Paths.LegacyVaultPath, m.Paths.VaultPath)
 }
 
 func (m *VaultManager) Init(ctx context.Context, password string) error {
@@ -322,7 +352,32 @@ func (m *VaultManager) EnsureCurrentSchema(ctx context.Context, db *store.Store)
 }
 
 func (m *VaultManager) MigrateVault(ctx context.Context, prompt PasswordPrompter) error {
-	db, err := m.Open(ctx)
+	source, relocated, err := m.migrationSource()
+	if err != nil {
+		return err
+	}
+	if relocated {
+		if err := m.prepareLegacyRelocation(source); err != nil {
+			_ = os.Remove(m.Paths.VaultPath)
+			return err
+		}
+	}
+	if err := m.migrateVaultAt(ctx, prompt, m.Paths.VaultPath); err != nil {
+		if relocated {
+			_ = os.Remove(m.Paths.VaultPath)
+		}
+		return err
+	}
+	if relocated {
+		if err := m.finishLegacyRelocation(source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *VaultManager) migrateVaultAt(ctx context.Context, prompt PasswordPrompter, path string) error {
+	db, err := m.openAt(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -414,6 +469,92 @@ func (m *VaultManager) MigrateVault(ctx context.Context, prompt PasswordPrompter
 		return err
 	}
 	return db.Vacuum(ctx)
+}
+
+func (m *VaultManager) migrationSource() (string, bool, error) {
+	if m.Paths.VaultOverride || m.Paths.LegacyVaultPath == "" || samePath(m.Paths.VaultPath, m.Paths.LegacyVaultPath) {
+		return m.Paths.VaultPath, false, nil
+	}
+	current, err := pathExists(m.Paths.VaultPath)
+	if err != nil {
+		return "", false, err
+	}
+	legacy, err := pathExists(m.Paths.LegacyVaultPath)
+	if err != nil {
+		return "", false, err
+	}
+	if current && legacy {
+		return "", false, fmt.Errorf("both the current vault %q and legacy vault %q exist; choose one with --vault or remove the duplicate before migrating", m.Paths.VaultPath, m.Paths.LegacyVaultPath)
+	}
+	if legacy {
+		return m.Paths.LegacyVaultPath, true, nil
+	}
+	return m.Paths.VaultPath, false, nil
+}
+
+func (m *VaultManager) prepareLegacyRelocation(source string) error {
+	if err := copyFile(source, m.Paths.VaultPath); err != nil {
+		return fmt.Errorf("copy legacy vault to %q: %w", m.Paths.VaultPath, err)
+	}
+	if err := copyOptionalFile(m.Paths.LegacySessionPath, m.Paths.SessionPath); err != nil {
+		return fmt.Errorf("copy legacy session state: %w", err)
+	}
+	if err := copyOptionalTree(legacyKeychainPath(m.Paths), filepath.Join(m.Paths.CacheDir, "keychain")); err != nil {
+		return fmt.Errorf("copy legacy keychain state: %w", err)
+	}
+	return nil
+}
+
+func (m *VaultManager) finishLegacyRelocation(source string) error {
+	paths := []string{
+		m.Paths.LegacySessionPath,
+		legacyKeychainPath(m.Paths),
+		source,
+	}
+	for _, path := range paths {
+		if err := checkArchiveIfExists(path); err != nil {
+			return err
+		}
+	}
+	for _, path := range paths {
+		if err := archiveIfExists(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func legacyKeychainPath(paths config.Paths) string {
+	if strings.TrimSpace(paths.LegacyCacheDir) == "" {
+		return ""
+	}
+	return filepath.Join(paths.LegacyCacheDir, "keychain")
+}
+
+func pathExists(path string) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, nil
+	}
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+func samePath(left, right string) bool {
+	if left == "" || right == "" {
+		return left == right
+	}
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
 }
 
 type keyResolutionDetails struct {
@@ -628,18 +769,121 @@ func (m *VaultManager) unwrapVaultKey(ctx context.Context, db *store.Store, pass
 }
 
 func backupFile(src, dst string) error {
+	return copyFile(src, dst)
+}
+
+func copyFile(src, dst string) error {
 	input, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer input.Close()
-	output, err := os.Create(dst)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	output, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	defer output.Close()
 	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		return err
+	}
+	if err := output.Chmod(0o600); err != nil {
+		_ = output.Close()
 		return err
 	}
 	return output.Close()
+}
+
+func copyOptionalFile(src, dst string) error {
+	if strings.TrimSpace(src) == "" {
+		return nil
+	}
+	info, err := os.Stat(src)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("expected file, found directory %q", src)
+	}
+	if exists, err := pathExists(dst); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+	return copyFile(src, dst)
+}
+
+func copyOptionalTree(src, dst string) error {
+	if strings.TrimSpace(src) == "" {
+		return nil
+	}
+	info, err := os.Stat(src)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected directory, found file %q", src)
+	}
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		return copyOptionalFile(path, target)
+	})
+}
+
+func archiveIfExists(path string) error {
+	if err := checkArchiveIfExists(path); err != nil {
+		return err
+	}
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	exists, err := pathExists(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := os.Rename(path, path+".bak.pre-location"); err != nil {
+		return fmt.Errorf("archive legacy path %q: %w", path, err)
+	}
+	return nil
+}
+
+func checkArchiveIfExists(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	exists, err := pathExists(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	dst := path + ".bak.pre-location"
+	if dstExists, err := pathExists(dst); err != nil {
+		return err
+	} else if dstExists {
+		return fmt.Errorf("cannot archive legacy path %q because %q already exists", path, dst)
+	}
+	return nil
 }
