@@ -252,6 +252,7 @@ nermius migrate
 
 - It renames where it can and otherwise copies, verifies size and SHA-256, then removes the original.
 - It never overwrites. An old copy identical to the new one is removed; one that differs is left where it is, the conflict is reported, and `migrate` exits non-zero after doing everything else. Keep the copy you want at the new location, delete the other, and run it again.
+- A vault's SQLite journals (`vault.db-wal`, `vault.db-shm`, `vault.db-journal`) move only together with it. When the vault stays, because of a conflict for example, they stay with it, and a journal with no `vault.db` beside it is left alone.
 - It deletes old `session.json` files instead of moving them.
 - It removes the old directories once they are empty (never `%APPDATA%`, `%LOCALAPPDATA%` or other parents) and leaves files it does not recognise in place.
 - Running it again finds nothing to do.

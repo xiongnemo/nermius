@@ -382,3 +382,142 @@ func TestCopyVerifiedPreservesContentModeAndTime(t *testing.T) {
 		t.Fatal("copyVerified overwrote an existing file")
 	}
 }
+
+func TestMigrateConflictKeepsJournalsWithTheOldVault(t *testing.T) {
+	env, home := windowsLayout(t)
+	data := filepath.Join(home, ".local", "share", "nermius")
+	old := filepath.Join(home, ".nermius")
+	writeTestFile(t, filepath.Join(data, "vault.db"), "new vault")
+	writeTestFile(t, filepath.Join(old, "vault.db"), "old vault")
+	writeTestFile(t, filepath.Join(old, "vault.db-wal"), "old wal")
+	writeTestFile(t, filepath.Join(old, "vault.db-shm"), "old shm")
+
+	plan := PlanMigration(env)
+	var lines []string
+	for _, action := range plan.Actions {
+		lines = append(lines, DescribePlanned(action))
+	}
+	text := strings.Join(lines, "\n")
+	for _, name := range []string{"vault.db-wal", "vault.db-shm"} {
+		want := "skip     " + filepath.Join(old, name) + ": kept with the old vault " + filepath.Join(old, "vault.db")
+		if !strings.Contains(text, want) {
+			t.Fatalf("plan lacks %q:\n%s", want, text)
+		}
+	}
+
+	result, out := execute(t, plan)
+	if result.Conflicts != 1 || result.Failures != 0 {
+		t.Fatalf("result = %+v\n%s", result, out)
+	}
+	assertMissing(t, filepath.Join(data, "vault.db-wal"))
+	assertMissing(t, filepath.Join(data, "vault.db-shm"))
+	if got := readTestFile(t, filepath.Join(data, "vault.db")); got != "new vault" {
+		t.Fatalf("new vault = %q", got)
+	}
+	for name, want := range map[string]string{"vault.db": "old vault", "vault.db-wal": "old wal", "vault.db-shm": "old shm"} {
+		if got := readTestFile(t, filepath.Join(old, name)); got != want {
+			t.Fatalf("old %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestMigrateMovesJournalsTogetherWithTheVault(t *testing.T) {
+	env, home := windowsLayout(t)
+	data := filepath.Join(home, ".local", "share", "nermius")
+	old := filepath.Join(home, "AppData", "Roaming", "nermius")
+	writeTestFile(t, filepath.Join(old, "vault.db"), "vault")
+	writeTestFile(t, filepath.Join(old, "vault.db-journal"), "journal")
+
+	plan := PlanMigration(env)
+	if line := DescribePlanned(plan.Actions[1]); !strings.Contains(line, "only together with "+filepath.Join(old, "vault.db")) {
+		t.Fatalf("journal move line = %q", line)
+	}
+	result, out := execute(t, plan)
+	if result.Conflicts != 0 || result.Failures != 0 {
+		t.Fatalf("result = %+v\n%s", result, out)
+	}
+	if got := readTestFile(t, filepath.Join(data, "vault.db-journal")); got != "journal" {
+		t.Fatalf("journal = %q", got)
+	}
+	if got := readTestFile(t, filepath.Join(data, "vault.db")); got != "vault" {
+		t.Fatalf("vault = %q", got)
+	}
+	assertMissing(t, old)
+}
+
+func TestMigrateLeavesAJournalWithoutItsVault(t *testing.T) {
+	env, home := windowsLayout(t)
+	orphan := filepath.Join(home, ".nermius", "vault.db-wal")
+	writeTestFile(t, orphan, "wal")
+
+	plan := PlanMigration(env)
+	if len(plan.Actions) != 1 || plan.Actions[0].Kind != ActionSkip || !strings.Contains(plan.Actions[0].Reason, "no vault.db next to it") {
+		t.Fatalf("plan = %+v", plan.Actions)
+	}
+	result, out := execute(t, plan)
+	if result.Conflicts != 0 || result.Failures != 0 {
+		t.Fatalf("result = %+v\n%s", result, out)
+	}
+	if got := readTestFile(t, orphan); got != "wal" {
+		t.Fatalf("orphan journal = %q", got)
+	}
+	assertMissing(t, filepath.Join(home, ".local", "share", "nermius"))
+}
+
+func TestMigrateIdenticalVaultWithAJournalIsAConflict(t *testing.T) {
+	env, home := windowsLayout(t)
+	data := filepath.Join(home, ".local", "share", "nermius")
+	writeTestFile(t, filepath.Join(data, "vault.db"), "same")
+	writeTestFile(t, filepath.Join(home, ".nermius", "vault.db"), "same")
+	writeTestFile(t, filepath.Join(home, ".nermius", "vault.db-wal"), "pending changes")
+
+	result, out := execute(t, PlanMigration(env))
+	if result.Conflicts != 1 {
+		t.Fatalf("result = %+v, want a conflict\n%s", result, out)
+	}
+	for _, name := range []string{"vault.db", "vault.db-wal"} {
+		if _, err := os.Stat(filepath.Join(home, ".nermius", name)); err != nil {
+			t.Fatalf("old %s removed: %v", name, err)
+		}
+	}
+	assertMissing(t, filepath.Join(data, "vault.db-wal"))
+}
+
+func TestMigrateWillNotMoveAVaultNextToAStrayJournal(t *testing.T) {
+	env, home := windowsLayout(t)
+	data := filepath.Join(home, ".local", "share", "nermius")
+	writeTestFile(t, filepath.Join(data, "vault.db-wal"), "stray")
+	writeTestFile(t, filepath.Join(home, ".nermius", "vault.db"), "vault")
+
+	result, out := execute(t, PlanMigration(env))
+	if result.Conflicts != 0 || result.Failures != 0 || !strings.Contains(out, "is already there without a vault") {
+		t.Fatalf("result = %+v\n%s", result, out)
+	}
+	assertMissing(t, filepath.Join(data, "vault.db"))
+	if got := readTestFile(t, filepath.Join(home, ".nermius", "vault.db")); got != "vault" {
+		t.Fatalf("old vault = %q", got)
+	}
+}
+
+func TestMigrateMovesTheVaultBackWhenItsJournalCannotFollow(t *testing.T) {
+	env, home := windowsLayout(t)
+	data := filepath.Join(home, ".local", "share", "nermius")
+	old := filepath.Join(home, ".nermius")
+	writeTestFile(t, filepath.Join(old, "vault.db"), "vault")
+	writeTestFile(t, filepath.Join(old, "vault.db-wal"), "wal")
+
+	plan := PlanMigration(env)
+	// Something takes the journal's place after planning.
+	writeTestFile(t, filepath.Join(data, "vault.db-wal"), "late arrival")
+	result, out := execute(t, plan)
+	if result.Failures == 0 {
+		t.Fatalf("result = %+v, want a failure\n%s", result, out)
+	}
+	assertMissing(t, filepath.Join(data, "vault.db"))
+	if got := readTestFile(t, filepath.Join(old, "vault.db")); got != "vault" {
+		t.Fatalf("old vault = %q\n%s", got, out)
+	}
+	if got := readTestFile(t, filepath.Join(old, "vault.db-wal")); got != "wal" {
+		t.Fatalf("old journal = %q", got)
+	}
+}

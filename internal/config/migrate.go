@@ -37,6 +37,9 @@ type Action struct {
 	From   string
 	To     string
 	Reason string
+	// With is set on a journal move: the journal moves only together with the
+	// vault at With, and goes back with it if any part of the pair fails.
+	With string
 }
 
 type MigrationPlan struct {
@@ -178,18 +181,90 @@ func (p *planner) readRoot(root string) []os.DirEntry {
 }
 
 // scanConfigRoot handles ~/.nermius and os.UserConfigDir()/nermius, which held
-// the vault and its backups.
+// the vault, its SQLite journals and its backups.
 func (p *planner) scanConfigRoot(root, except string) {
-	for _, entry := range p.readRoot(root) {
-		path := filepath.Join(root, entry.Name())
+	entries := p.readRoot(root)
+	hasVault := false
+	journals := []string{}
+	for _, entry := range entries {
+		switch name := entry.Name(); {
+		case entry.IsDir():
+		case name == DefaultVaultName:
+			hasVault = true
+		case isVaultJournal(name):
+			journals = append(journals, name)
+		}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		path := filepath.Join(root, name)
 		if samePath(path, except) || p.current(path) {
 			continue
 		}
-		if item := vaultFileItem(entry.Name()); item != "" && !entry.IsDir() {
-			p.planFile(item, path, filepath.Join(p.dirs.Data, entry.Name()))
+		switch {
+		case entry.IsDir():
+			p.unknown(root, path)
+		case name == DefaultVaultName:
+			p.planVault(root, journals)
+		case isVaultJournal(name):
+			// Planned with vault.db. On its own SQLite could replay it onto
+			// another database, so it stays put.
+			if !hasVault {
+				p.add(Action{Kind: ActionSkip, Item: "vault journal", From: path, Reason: "no vault.db next to it; left in place"})
+			}
+		case strings.HasPrefix(name, DefaultVaultName+".bak."):
+			p.planFile("vault backup", path, filepath.Join(p.dirs.Data, name))
+		default:
+			p.unknown(root, path)
+		}
+	}
+}
+
+// vaultJournalSuffixes are the files SQLite keeps next to a database: the
+// rollback journal, and the write-ahead log with its index.
+var vaultJournalSuffixes = []string{"-journal", "-wal", "-shm"}
+
+func isVaultJournal(name string) bool {
+	for _, suffix := range vaultJournalSuffixes {
+		if name == DefaultVaultName+suffix {
+			return true
+		}
+	}
+	return false
+}
+
+// planVault plans vault.db in root together with its journals: they move
+// with it, or they stay with it.
+func (p *planner) planVault(root string, journals []string) {
+	src := filepath.Join(root, DefaultVaultName)
+	dst := filepath.Join(p.dirs.Data, DefaultVaultName)
+	kind, reason := p.decide(src, dst)
+	switch {
+	case kind == "":
+		return
+	case kind == ActionMove:
+		// A journal already at the destination belongs to no vault there;
+		// SQLite would replay it onto this one.
+		for _, suffix := range vaultJournalSuffixes {
+			stray := dst + suffix
+			_, claimed := p.claimed[pathKey(stray)]
+			if _, err := os.Lstat(stray); claimed || err == nil {
+				kind, reason = ActionSkip, fmt.Sprintf("%s is already there without a vault; move or delete it, then run migrate again", stray)
+				break
+			}
+		}
+	case kind == ActionDuplicate && len(journals) > 0:
+		// The journal may hold changes the copy at the new location lacks.
+		kind, reason = ActionConflict, "its journal may hold changes the new copy lacks"
+	}
+	p.record(kind, "vault", src, dst, reason, "")
+	for _, name := range journals {
+		journal := filepath.Join(root, name)
+		if kind == ActionMove {
+			p.record(ActionMove, "vault journal", journal, filepath.Join(p.dirs.Data, name), "", src)
 			continue
 		}
-		p.unknown(root, path)
+		p.add(Action{Kind: ActionSkip, Item: "vault journal", From: journal, Reason: "kept with the old vault " + src})
 	}
 }
 
@@ -214,20 +289,6 @@ func (p *planner) scanCacheRoot(root string) {
 			p.unknown(root, path)
 		}
 	}
-}
-
-// vaultFileItem names the vault files nermius wrote next to vault.db: the
-// database, SQLite's journal, and the backups `vault migrate` made.
-func vaultFileItem(name string) string {
-	switch {
-	case name == DefaultVaultName:
-		return "vault"
-	case strings.HasPrefix(name, DefaultVaultName+"-"):
-		return "vault journal"
-	case strings.HasPrefix(name, DefaultVaultName+".bak."):
-		return "vault backup"
-	}
-	return ""
 }
 
 func (p *planner) unknown(root, path string) {
@@ -264,42 +325,56 @@ func (p *planner) planTree(item, src, dst string) {
 }
 
 func (p *planner) planFile(item, src, dst string) {
+	kind, reason := p.decide(src, dst)
+	p.record(kind, item, src, dst, reason, "")
+}
+
+// decide works out what to do with src given what is, or will be, at dst. An
+// empty kind means there is nothing to do.
+func (p *planner) decide(src, dst string) (ActionKind, string) {
 	if samePath(src, dst) {
-		return
+		return "", ""
 	}
 	info, err := os.Lstat(src)
 	if err != nil {
-		p.add(Action{Kind: ActionSkip, Item: item, From: src, Reason: err.Error()})
-		return
+		return ActionSkip, err.Error()
 	}
 	if !info.Mode().IsRegular() && info.Mode()&fs.ModeSymlink == 0 {
-		p.add(Action{Kind: ActionSkip, Item: item, From: src, Reason: "not a regular file; left in place"})
-		return
+		return ActionSkip, "not a regular file; left in place"
 	}
 	occupant, claimed := p.claimed[pathKey(dst)]
 	if !claimed {
 		if _, err := os.Lstat(dst); errors.Is(err, fs.ErrNotExist) {
-			p.claimed[pathKey(dst)] = src
-			p.gone[pathKey(src)] = true
-			p.add(Action{Kind: ActionMove, Item: item, From: src, To: dst})
-			return
+			return ActionMove, ""
 		} else if err != nil {
-			p.add(Action{Kind: ActionSkip, Item: item, From: src, Reason: err.Error()})
-			return
+			return ActionSkip, err.Error()
 		}
 		occupant = dst
 	}
 	same, err := sameContent(src, occupant)
 	if err != nil {
-		p.add(Action{Kind: ActionSkip, Item: item, From: src, Reason: err.Error()})
-		return
+		return ActionSkip, err.Error()
 	}
 	if same {
-		p.gone[pathKey(src)] = true
-		p.add(Action{Kind: ActionDuplicate, Item: item, From: src, To: dst})
-		return
+		return ActionDuplicate, ""
 	}
-	p.add(Action{Kind: ActionConflict, Item: item, From: src, To: dst})
+	return ActionConflict, ""
+}
+
+func (p *planner) record(kind ActionKind, item, src, dst, reason, with string) {
+	switch kind {
+	case "":
+		return
+	case ActionMove:
+		p.claimed[pathKey(dst)] = src
+		p.gone[pathKey(src)] = true
+	case ActionDuplicate:
+		p.gone[pathKey(src)] = true
+	}
+	if kind == ActionSkip {
+		dst = ""
+	}
+	p.add(Action{Kind: kind, Item: item, From: src, To: dst, Reason: reason, With: with})
 }
 
 // planRemoveIfEmpty plans removing dir and its subdirectories once everything
@@ -342,11 +417,14 @@ type MigrationResult struct {
 func DescribePlanned(action Action) string {
 	switch action.Kind {
 	case ActionMove:
+		if action.With != "" {
+			return fmt.Sprintf("move     %s: %s -> %s, only together with %s", action.Item, action.From, action.To, action.With)
+		}
 		return fmt.Sprintf("move     %s: %s -> %s", action.Item, action.From, action.To)
 	case ActionDuplicate:
 		return fmt.Sprintf("remove   %s %s: an identical copy is already at %s", action.Item, action.From, action.To)
 	case ActionConflict:
-		return fmt.Sprintf("conflict %s: %s differs from %s; both will be kept", action.Item, action.From, action.To)
+		return fmt.Sprintf("conflict %s: %s differs from %s%s; both will be kept", action.Item, action.From, action.To, reasonSuffix(action))
 	case ActionDelete:
 		return fmt.Sprintf("delete   %s %s: %s", action.Item, action.From, action.Reason)
 	case ActionRemoveDir:
@@ -356,6 +434,13 @@ func DescribePlanned(action Action) string {
 	}
 }
 
+func reasonSuffix(action Action) string {
+	if action.Reason == "" {
+		return ""
+	}
+	return " (" + action.Reason + ")"
+}
+
 // Execute performs the plan, printing each action to out. It carries on past
 // conflicts and failures and counts them.
 func (p MigrationPlan) Execute(out io.Writer) MigrationResult {
@@ -363,12 +448,15 @@ func (p MigrationPlan) Execute(out io.Writer) MigrationResult {
 	for _, action := range p.Actions {
 		switch action.Kind {
 		case ActionMove:
-			executeMove(out, action, &result)
+			if action.With != "" {
+				continue // moved with its vault
+			}
+			executeMoveGroup(out, action, p.journalsOf(action.From), &result)
 		case ActionDuplicate:
 			executeDuplicate(out, action, &result)
 		case ActionConflict:
 			result.Conflicts++
-			fmt.Fprintf(out, "conflict: %s %s differs from %s; kept both\n", action.Item, action.From, action.To)
+			fmt.Fprintf(out, "conflict: %s %s differs from %s%s; kept both\n", action.Item, action.From, action.To, reasonSuffix(action))
 		case ActionDelete:
 			if err := os.Remove(action.From); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				result.Failures++
@@ -391,33 +479,76 @@ func (p MigrationPlan) Execute(out io.Writer) MigrationResult {
 	return result
 }
 
-func executeMove(out io.Writer, action Action, result *MigrationResult) {
-	// Something may have appeared at the destination since the plan was made.
+func (p MigrationPlan) journalsOf(vault string) []Action {
+	journals := []Action{}
+	for _, action := range p.Actions {
+		if action.Kind == ActionMove && action.With != "" && samePath(action.With, vault) {
+			journals = append(journals, action)
+		}
+	}
+	return journals
+}
+
+// executeMoveGroup moves a file and the journals that must stay with it. If a
+// journal cannot follow, everything already moved goes back, so the pair is
+// never split.
+func executeMoveGroup(out io.Writer, lead Action, journals []Action, result *MigrationResult) {
+	if !executeMove(out, lead, len(journals) == 0, result) {
+		for _, journal := range journals {
+			fmt.Fprintf(out, "kept %s %s with the old vault %s\n", journal.Item, journal.From, lead.From)
+		}
+		return
+	}
+	moved := []Action{lead}
+	for _, journal := range journals {
+		if err := moveFile(journal.From, journal.To); err != nil {
+			result.Failures++
+			fmt.Fprintf(out, "failed to move %s: %v\n", journal.From, err)
+			for i := len(moved) - 1; i >= 0; i-- {
+				if err := moveFile(moved[i].To, moved[i].From); err != nil {
+					result.Failures++
+					fmt.Fprintf(out, "failed to move %s back to %s: %v; move it back by hand\n", moved[i].To, moved[i].From, err)
+					continue
+				}
+				fmt.Fprintf(out, "moved %s back to %s\n", moved[i].To, moved[i].From)
+			}
+			return
+		}
+		moved = append(moved, journal)
+		fmt.Fprintf(out, "moved %s: %s -> %s\n", journal.Item, journal.From, journal.To)
+	}
+}
+
+// executeMove moves one file and reports whether it did. An identical file
+// that has appeared at the destination since planning counts as a duplicate
+// only if allowDuplicate is set; otherwise it is a conflict.
+func executeMove(out io.Writer, action Action, allowDuplicate bool, result *MigrationResult) bool {
 	if _, err := os.Lstat(action.To); err == nil {
 		same, err := sameContent(action.From, action.To)
 		switch {
 		case err != nil:
 			result.Failures++
 			fmt.Fprintf(out, "failed to compare %s with %s: %v\n", action.From, action.To, err)
-		case same:
+		case same && allowDuplicate:
 			executeDuplicate(out, action, result)
 		default:
 			result.Conflicts++
 			fmt.Fprintf(out, "conflict: %s %s differs from %s; kept both\n", action.Item, action.From, action.To)
 		}
-		return
+		return false
 	}
 	if err := os.MkdirAll(filepath.Dir(action.To), 0o700); err != nil {
 		result.Failures++
 		fmt.Fprintf(out, "failed to move %s: %v\n", action.From, err)
-		return
+		return false
 	}
 	if err := moveFile(action.From, action.To); err != nil {
 		result.Failures++
 		fmt.Fprintf(out, "failed to move %s: %v\n", action.From, err)
-		return
+		return false
 	}
 	fmt.Fprintf(out, "moved %s: %s -> %s\n", action.Item, action.From, action.To)
+	return true
 }
 
 func executeDuplicate(out io.Writer, action Action, result *MigrationResult) {

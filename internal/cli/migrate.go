@@ -29,7 +29,8 @@ nermius keeps using what it finds there and says so on stderr.
 migrate never overwrites a file. If the new location already holds one, an
 identical old copy is removed; a different one stays where it is, the conflict
 is reported, and migrate exits non-zero once it has done everything else.
-Empty old directories are removed afterwards. session.json files from the
+A vault's SQLite journal files move only together with it; when the vault
+stays, they stay with it. Empty old directories are removed afterwards. session.json files from the
 earliest releases hold a plaintext copy of the vault key; they are deleted,
 not moved. Run migrate again after it has finished and it finds nothing to do.
 
