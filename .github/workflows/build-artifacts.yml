@@ -195,6 +195,34 @@ jobs:
           print(f"package_matrix={json.dumps({'include': package_targets}, separators=(',', ':'))}")
           PY
 
+  # File locations and migrate behave differently on each OS, so the tests run
+  # on all three. Publishing does not wait for them.
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # vet stays off on Windows until vault_presence_windows.go's
+      # unsafe.Pointer conversions are reworked; it flags them there.
+      - name: Vet
+        if: runner.os != 'Windows'
+        shell: bash
+        run: go vet ./...
+
+      - name: Test
+        shell: bash
+        run: go test ./...
+
   build:
     name: Build ${{ matrix.target }}
     needs: targets
