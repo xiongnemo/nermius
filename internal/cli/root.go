@@ -28,6 +28,10 @@ import (
 type runtime struct {
 	vaultPath string
 	verbose   int
+	// stderr receives the old-location notices; nil means os.Stderr.
+	stderr io.Writer
+	// noticed holds the old-location notices already printed in this run.
+	noticed map[string]bool
 }
 
 func Execute() error {
@@ -73,7 +77,32 @@ func newRootCommand(rt *runtime) *cobra.Command {
 }
 
 func (r *runtime) paths() (config.Paths, error) {
-	return config.ResolvePaths(r.vaultPath)
+	paths, err := config.ResolvePaths(r.vaultPath)
+	if err != nil {
+		return config.Paths{}, err
+	}
+	r.noticeLegacy(paths)
+	return paths, nil
+}
+
+// noticeLegacy prints one stderr line per item used from an old location,
+// once per run. It runs before the TUI takes the screen.
+func (r *runtime) noticeLegacy(paths config.Paths) {
+	for _, use := range paths.Legacy {
+		key := use.Item + "\x00" + use.Path
+		if r.noticed[key] {
+			continue
+		}
+		if r.noticed == nil {
+			r.noticed = map[string]bool{}
+		}
+		r.noticed[key] = true
+		out := r.stderr
+		if out == nil {
+			out = os.Stderr
+		}
+		fmt.Fprintln(out, use.Notice())
+	}
 }
 
 func (r *runtime) manager() (*service.VaultManager, error) {
@@ -300,7 +329,11 @@ func (r *runtime) newVaultKeychainCmd() *cobra.Command {
 func (r *runtime) newVaultMigrateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "migrate",
-		Short: "Migrate a legacy vault to the whole-vault encrypted schema",
+		Short: "Upgrade a legacy vault to the whole-vault encrypted schema",
+		Long: `Upgrade a legacy vault to the whole-vault encrypted schema, in place.
+
+This changes the vault's format, not its location. To move files that older
+releases left in their old locations, run "nermius migrate".`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			manager, err := r.manager()
 			if err != nil {

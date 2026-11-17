@@ -205,7 +205,7 @@ func (s *windowsCNGPresenceStore) Delete(ctx context.Context, vaultID string) er
 var errNCryptKeyNotFound = errors.New("CNG key not found")
 
 func strongUnlockMaterialBlobPath(paths config.Paths, vaultID string) string {
-	return filepath.Join(paths.CacheDir, "keychain", vaultID+ncryptStrongPresenceBlobFileSuffix)
+	return filepath.Join(paths.KeychainDir, vaultID+ncryptStrongPresenceBlobFileSuffix)
 }
 
 func windowsCNGKeyName(vaultID string) string {

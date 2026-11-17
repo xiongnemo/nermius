@@ -442,11 +442,11 @@ func TestLocalDownloadPreviewDetectsDirectoryTarget(t *testing.T) {
 func TestBackendTermixAddCanCreateProfileWithoutValidation(t *testing.T) {
 	dir := t.TempDir()
 	vaultPath := filepath.Join(dir, "vault.db")
+	isolateHome(t)
 	manager := service.NewVaultManager(config.Paths{
-		ConfigDir:      dir,
-		CacheDir:       dir,
+		DataDir:        dir,
 		VaultPath:      vaultPath,
-		SessionPath:    filepath.Join(dir, "session.json"),
+		KeychainDir:    filepath.Join(dir, "keychain"),
 		KnownHostsPath: filepath.Join(dir, "known_hosts"),
 	})
 	if err := manager.Init(context.Background(), "test-password"); err != nil {
@@ -498,10 +498,9 @@ func newCLITestCatalog(t *testing.T) (*service.Catalog, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "vault.db")
 	manager := service.NewVaultManager(config.Paths{
-		ConfigDir:      filepath.Dir(path),
-		CacheDir:       filepath.Dir(path),
+		DataDir:        filepath.Dir(path),
 		VaultPath:      path,
-		SessionPath:    filepath.Join(filepath.Dir(path), "session.json"),
+		KeychainDir:    filepath.Join(filepath.Dir(path), "keychain"),
 		KnownHostsPath: filepath.Join(filepath.Dir(path), "known_hosts"),
 	})
 	db, err := manager.Open(context.Background())

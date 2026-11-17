@@ -475,10 +475,9 @@ func mustResolveTestPaths(t *testing.T, path string) config.Paths {
 	t.Helper()
 	dir := filepath.Dir(path)
 	return config.Paths{
-		ConfigDir:      dir,
-		CacheDir:       dir,
+		DataDir:        dir,
 		VaultPath:      path,
-		SessionPath:    filepath.Join(dir, "session.json"),
+		KeychainDir:    filepath.Join(dir, "keychain"),
 		KnownHostsPath: filepath.Join(dir, "known_hosts"),
 	}
 }

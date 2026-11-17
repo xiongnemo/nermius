@@ -76,5 +76,5 @@ var (
 )
 
 func unlockMaterialBlobPath(paths config.Paths, vaultID string) string {
-	return filepath.Join(paths.CacheDir, "keychain", fmt.Sprintf("%s.bin", vaultID))
+	return filepath.Join(paths.KeychainDir, fmt.Sprintf("%s.bin", vaultID))
 }

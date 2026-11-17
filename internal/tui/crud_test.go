@@ -222,10 +222,9 @@ func testPaths(t *testing.T) config.Paths {
 	t.Helper()
 	dir := t.TempDir()
 	return config.Paths{
-		ConfigDir:      dir,
-		CacheDir:       dir,
+		DataDir:        dir,
 		VaultPath:      filepath.Join(dir, "vault.db"),
-		SessionPath:    filepath.Join(dir, "session.json"),
+		KeychainDir:    filepath.Join(dir, "keychain"),
 		KnownHostsPath: filepath.Join(dir, "known_hosts"),
 	}
 }
