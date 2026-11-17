@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -581,5 +582,41 @@ func installFakeVaultBackends(storeBackend UnlockMaterialStore, strongBackend Un
 		newUnlockMaterialStore = prevStore
 		newStrongPresenceMaterialStore = prevStrongStore
 		newPresenceAuthorizer = prevPresence
+	}
+}
+
+func TestOpenTightensTheVaultFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows files have no group or other permission bits")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	created := filepath.Join(dir, "created", "vault.db")
+	if err := NewVaultManager(mustResolveTestPaths(t, created)).Init(ctx, "master-pass"); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	existing := filepath.Join(dir, "existing", "vault.db")
+	if err := os.MkdirAll(filepath.Dir(existing), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existing, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := NewVaultManager(mustResolveTestPaths(t, existing)).Open(ctx)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	_ = db.Close()
+	for _, path := range []string{created, existing} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v, want 0600", path, info.Mode().Perm())
+		}
 	}
 }

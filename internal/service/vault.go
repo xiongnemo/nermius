@@ -51,6 +51,9 @@ func (m *VaultManager) openAt(ctx context.Context, path string) (*store.Store, e
 		_ = db.Close()
 		return nil, err
 	}
+	// SQLite creates the file 0644 and gives its journals the same mode. A
+	// file system without Unix modes may refuse the chmod; the vault still opens.
+	_ = config.TightenPrivateFile(path)
 	return db, nil
 }
 

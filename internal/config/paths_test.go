@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -264,5 +265,34 @@ func TestLegacyNoticeNamesBothLocations(t *testing.T) {
 	}
 	if strings.Contains(notice, "\n") {
 		t.Fatalf("notice must be one line: %q", notice)
+	}
+}
+
+func TestTightenPrivateFileOnlyRemovesPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows files have no group or other permission bits")
+	}
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		mode, want os.FileMode
+	}{{0o644, 0o600}, {0o755, 0o600}, {0o600, 0o600}, {0o400, 0o400}, {0o444, 0o400}} {
+		path := filepath.Join(dir, tc.mode.String())
+		writeTestFile(t, path, "x")
+		if err := os.Chmod(path, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := TightenPrivateFile(path); err != nil {
+			t.Fatalf("TightenPrivateFile(%v) failed: %v", tc.mode, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != tc.want {
+			t.Fatalf("mode %v became %v, want %v", tc.mode, info.Mode().Perm(), tc.want)
+		}
+	}
+	if err := TightenPrivateFile(filepath.Join(dir, "missing")); err != nil {
+		t.Fatalf("a missing file must not be an error: %v", err)
 	}
 }

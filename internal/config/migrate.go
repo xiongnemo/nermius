@@ -514,6 +514,7 @@ func executeMoveGroup(out io.Writer, lead Action, journals []Action, result *Mig
 			}
 			return
 		}
+		_ = TightenPrivateFile(journal.To)
 		moved = append(moved, journal)
 		fmt.Fprintf(out, "moved %s: %s -> %s\n", journal.Item, journal.From, journal.To)
 	}
@@ -547,6 +548,9 @@ func executeMove(out io.Writer, action Action, allowDuplicate bool, result *Migr
 		fmt.Fprintf(out, "failed to move %s: %v\n", action.From, err)
 		return false
 	}
+	// Everything migrate moves is the vault, its journals and backups, or
+	// key material. A file system without Unix modes may refuse; that is fine.
+	_ = TightenPrivateFile(action.To)
 	fmt.Fprintf(out, "moved %s: %s -> %s\n", action.Item, action.From, action.To)
 	return true
 }

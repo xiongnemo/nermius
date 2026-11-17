@@ -222,7 +222,7 @@ Nermius uses the XDG Base Directory layout under your home directory on Linux, m
 | Vault (`vault.db`, plus `vault.db.bak.*` backups made by `vault migrate`) | `$XDG_DATA_HOME/nermius/`, default `~/.local/share/nermius/` | data |
 | Keychain enrollment blobs (`keychain/<vault-id>.bin`; Windows only, DPAPI- or CNG-protected) | `$XDG_DATA_HOME/nermius/keychain/`, default `~/.local/share/nermius/keychain/` | data |
 
-Nermius writes nothing to `$XDG_CONFIG_HOME`, `$XDG_STATE_HOME` or `$XDG_CACHE_HOME` today, and it creates no sockets. Directories it creates are `0700`.
+Nermius writes nothing to `$XDG_CONFIG_HOME`, `$XDG_STATE_HOME` or `$XDG_CACHE_HOME` today, and it creates no sockets. Directories it creates are `0700`. On Linux and macOS the vault file is tightened to `0600` whenever Nermius opens it (SQLite gives its journals the same mode), and `migrate` does the same for everything it moves.
 
 These stay where they are, because they belong to someone else: `~/.ssh/known_hosts` (OpenSSH's file, used by the `file` known-hosts backend), `~/.ssh/config` (read by `import openssh`), the Termius data directory (read by `termius export|import`, default `%APPDATA%\Termius`), and the binary that `install` copies to `~/.local/bin`.
 

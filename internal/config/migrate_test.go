@@ -521,3 +521,32 @@ func TestMigrateMovesTheVaultBackWhenItsJournalCannotFollow(t *testing.T) {
 		t.Fatalf("old journal = %q", got)
 	}
 }
+
+func TestMigrateTightensMovedVaultFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows files have no group or other permission bits")
+	}
+	home := t.TempDir()
+	env := testEnv("darwin", home, nil)
+	old := filepath.Join(home, "Library", "Application Support", "nermius")
+	data := filepath.Join(home, ".local", "share", "nermius")
+	modes := map[string]os.FileMode{"vault.db": 0o644, "vault.db-wal": 0o664, "vault.db-shm": 0o644, "vault.db.bak.pre-schema-v2": 0o644}
+	for name, mode := range modes {
+		writeTestFile(t, filepath.Join(old, name), name)
+		if err := os.Chmod(filepath.Join(old, name), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if result, out := execute(t, PlanMigration(env)); result.Conflicts != 0 || result.Failures != 0 {
+		t.Fatalf("result = %+v\n%s", result, out)
+	}
+	for name := range modes {
+		info, err := os.Stat(filepath.Join(data, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v, want 0600", name, info.Mode().Perm())
+		}
+	}
+}

@@ -283,6 +283,26 @@ func expandUserIn(home, path string) string {
 	return path
 }
 
+// TightenPrivateFile drops group and other permissions from the file at path,
+// so a vault SQLite created as 0644 ends up 0600. It never adds a permission.
+// Windows has no such bits, so it does nothing there.
+func TightenPrivateFile(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if perm := info.Mode().Perm(); info.Mode().IsRegular() && perm&^0o600 != 0 {
+		return os.Chmod(path, perm&0o600)
+	}
+	return nil
+}
+
 func EnsurePrivateFile(path string, data []byte) error {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return err
