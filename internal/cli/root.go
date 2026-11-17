@@ -55,6 +55,7 @@ func newRootCommand(rt *runtime) *cobra.Command {
 	root.AddCommand(
 		rt.newVersionCmd(),
 		rt.newVaultCmd(),
+		rt.newMigrateCmd(),
 		rt.newInstallCmd(),
 		rt.newKnownHostsCmd(),
 		rt.newBackendCmd(),
