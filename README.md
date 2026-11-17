@@ -5,6 +5,7 @@ Portable SSH manager with a local encrypted SQLite vault, a Cobra CLI, and a tce
 ## Current scope
 
 - Local-first vault lifecycle: `vault init|keychain enable|keychain disable|keychain status|migrate|change-password`
+- Moving files left by older releases to the XDG directories with `migrate [--dry-run]`
 - Build metadata reporting with `version`
 - Self-install command: `install [--dir PATH]`
 - CRUD for `host`, `group`, `profile`, `identity`, `key`, `forward`, `workspace`
@@ -99,15 +100,7 @@ Normal read/write commands now auto-unlock:
 - first via the enrolled system keychain backend
 - otherwise by prompting for the master password
 
-Nermius-owned local state uses one home-directory root by default:
-
-```text
-~/.nermius/vault.db
-~/.nermius/cache/session.json
-~/.nermius/cache/keychain/<vault-id>.bin
-```
-
-The default file-backed OpenSSH known-hosts fallback remains `~/.ssh/known_hosts` for interoperability. An explicit `--vault PATH` still uses the path supplied by the caller. There is no plaintext local session file anymore. On migrated/current vaults, object bodies and secrets are stored in encrypted `records`; legacy vaults must be upgraded explicitly with `nermius vault migrate`.
+The vault lives in `~/.local/share/nermius/vault.db` on every platform; see [Files](#files) for everything Nermius writes and where. There is no plaintext local session file anymore. On migrated/current vaults, object bodies and secrets are stored in encrypted `records`; legacy vaults must be upgraded explicitly with `nermius vault migrate`.
 
 Inside the TUI object tabs:
 
@@ -163,9 +156,11 @@ nermius known-host list
 nermius connect my-host
 ```
 
-If you created a vault with an older Nermius build, migrate its schema and default location once before using regular commands:
+If you created a vault with an older Nermius build, move it to the current location and upgrade its schema once:
 
 ```powershell
+nermius migrate --dry-run
+nermius migrate
 nermius vault migrate
 ```
 
@@ -214,9 +209,53 @@ sudo pacman -U nermius-linux-amd64.pkg.tar.zst
 sudo opkg install nermius-linux-amd64.ipk
 ```
 
-These packages install `nermius` to `/usr/bin/nermius`. apt, dnf and apk users can install them from [package.anzupop.com](https://package.anzupop.com) instead. Dev prereleases are packaged as `X.Y.Z~pre-1` (apk `X.Y.Z_pre-r1`); a release, published by pushing its exact `vX.Y.Z` tag, as `X.Y.Z-1`.
+These packages install `nermius` to `/usr/bin/nermius`; per-user files still go where [Files](#files) says. apt, dnf and apk users can install them from [package.anzupop.com](https://package.anzupop.com) instead. Dev prereleases are packaged as `X.Y.Z~pre-1` (apk `X.Y.Z_pre-r1`); a release, published by pushing its exact `vX.Y.Z` tag, as `X.Y.Z-1`.
 
 The `.apk` and `.ipk` packages carry a musl build, because Alpine and OpenWrt are musl systems: the clipboard support reaches libc through purego, which links the glibc binary dynamically even without cgo, so the plain Linux build cannot start there. The same musl builds are published as `nermius-linux-musl-<arch>.tar.gz`.
+
+## Files
+
+Nermius uses the XDG Base Directory layout under your home directory on Linux, macOS and Windows alike. `~` is `$HOME` on Linux and macOS and `%USERPROFILE%` on Windows.
+
+| What | Where | Kind |
+|---|---|---|
+| Vault (`vault.db`, plus `vault.db.bak.*` backups made by `vault migrate`) | `$XDG_DATA_HOME/nermius/`, default `~/.local/share/nermius/` | data |
+| Keychain enrollment blobs (`keychain/<vault-id>.bin`; Windows only, DPAPI- or CNG-protected) | `$XDG_DATA_HOME/nermius/keychain/`, default `~/.local/share/nermius/keychain/` | data |
+
+Nermius writes nothing to `$XDG_CONFIG_HOME`, `$XDG_STATE_HOME` or `$XDG_CACHE_HOME` today, and it creates no sockets. Directories it creates are `0700`.
+
+These stay where they are, because they belong to someone else: `~/.ssh/known_hosts` (OpenSSH's file, used by the `file` known-hosts backend), `~/.ssh/config` (read by `import openssh`), the Termius data directory (read by `termius export|import`, default `%APPDATA%\Termius`), and the binary that `install` copies to `~/.local/bin`.
+
+Environment variables:
+
+- `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` move the matching directory. A value counts only if it is an absolute path; a relative one is ignored, as the XDG spec requires, on Windows too.
+- `--vault PATH` uses that vault file instead of the default, as before.
+- `NERMIUS_MASTER_PASSWORD` unlocks the vault without a prompt.
+
+Older releases kept these files elsewhere:
+
+| Release | Vault | Keychain blobs |
+|---|---|---|
+| v0.0.33-dev | `~/.nermius/vault.db` | `~/.nermius/cache/keychain/` |
+| before v0.0.33-dev | `%APPDATA%\nermius\vault.db` (Windows), `~/Library/Application Support/nermius/vault.db` (macOS), `~/.config/nermius/vault.db`, or `$XDG_CONFIG_HOME/nermius/vault.db` (Linux and others) | `%LOCALAPPDATA%\nermius\keychain\` (Windows) |
+
+The earliest builds also wrote `session.json`, a cached plaintext copy of the vault key, to the OS cache directory (`%LOCALAPPDATA%\nermius`, `~/Library/Caches/nermius`, `~/.cache/nermius`), and `vault migrate` in v0.0.33-dev left `*.bak.pre-location` copies in the old directories.
+
+Nermius resolves the vault and the keychain blobs separately. It uses the new location if the file is there; otherwise, if an older release left it in one of the places above, it keeps using it from there and prints one line to stderr, once per run, saying to run `nermius migrate`. A fresh install only ever uses the new location, and an empty file or directory at the new location never hides an old one.
+
+`nermius migrate` moves everything over:
+
+```powershell
+nermius migrate --dry-run   # print every move and skip, change nothing
+nermius migrate
+```
+
+- It renames where it can and otherwise copies, verifies size and SHA-256, then removes the original.
+- It never overwrites. An old copy identical to the new one is removed; one that differs is left where it is, the conflict is reported, and `migrate` exits non-zero after doing everything else. Keep the copy you want at the new location, delete the other, and run it again.
+- It deletes old `session.json` files instead of moving them.
+- It removes the old directories once they are empty (never `%APPDATA%`, `%LOCALAPPDATA%` or other parents) and leaves files it does not recognise in place.
+- Running it again finds nothing to do.
+- It cannot tell whether another Nermius is running, so close the TUI and any `connect` or `forward start` first.
 
 ## Vault Security
 
@@ -245,7 +284,7 @@ Behavior notes:
 - if keychain unlock fails but the master password unlocks the vault, interactive CLI commands explain the keychain failure and offer to disable that local enrollment. This is equivalent to running `nermius vault keychain disable`; it does not rewrite vault records or remove master-password access.
 - a malicious same-user process may still invoke Nermius or Windows APIs and cause an OS authorization prompt, deny access by deleting local key material, or wait for the user to approve a prompt. The strong mode is meant to prevent silent vault-key unwrap, not to defend against a fully compromised user session.
 - current-schema vaults use whole-vault encrypted records, so hostnames, usernames, labels, known-host payloads, and secrets are no longer stored as plaintext rows in SQLite.
-- `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault. When it finds a vault at the old OS-specific default location, it copies the vault and local session/keychain sidecars into `~/.nermius`, then archives the old files with `.bak.pre-location`. Regular commands refuse to create a new empty default vault while the old location still exists. If both locations contain a vault, resolve the duplicate explicitly with `--vault` before migrating.
+- `vault migrate` is explicit and creates a backup at `<vault>.bak.pre-schema-v2` before converting a legacy vault. It upgrades the vault where it is; moving a vault out of an old location is `nermius migrate`'s job (see [Files](#files)).
 
 ### Moving A Vault To Another Machine
 
@@ -257,7 +296,7 @@ The SQLite vault file is portable. The system keychain enrollment is not portabl
    nermius vault keychain status
    ```
 
-   The default path is `~/.nermius/vault.db` on every platform. Older builds may have used an OS-specific config directory; run `nermius vault migrate` before normal commands so the old location is detected and moved safely.
+   The default path is `~/.local/share/nermius/vault.db` on every platform (`$XDG_DATA_HOME/nermius/vault.db` when `XDG_DATA_HOME` is set). If the old machine still runs an older build, its vault may be in an old location; `nermius migrate --dry-run` shows where.
 
 2. Copy `vault.db` to the new machine.
 
