@@ -249,6 +249,58 @@ jobs:
           # regardless.
           version: 0.15.2
 
+      # The version Windows shows in the exe's Properties > Details. Only
+      # RT_VERSION goes in: a manifest would change how Windows runs the binary
+      # (DPI awareness, reported OS version, code page). go-winres writes
+      # rsrc_windows_<goarch>.syso next to main.go, and go build links a .syso
+      # only into the GOOS/GOARCH its name carries. The exe is flagged
+      # Prerelease exactly when publish would make its release a prerelease.
+      - name: Generate Windows version resource
+        if: matrix.goos == 'windows'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.goarch }}
+          BASE_VERSION: ${{ needs.targets.outputs.base_version }}
+          TAG: ${{ needs.targets.outputs.tag }}
+          RELEASE: ${{ needs.targets.outputs.release }}
+        run: |
+          set -euo pipefail
+          python - <<'PY' > winres.json
+          import json
+          import os
+
+          name = os.environ["BINARY_NAME"]
+          tag = os.environ["TAG"]
+          numeric = os.environ["BASE_VERSION"].removeprefix("v") + ".0"
+          version_info = {
+              "fixed": {
+                  "file_version": numeric,
+                  "product_version": numeric,
+                  "flags": "" if os.environ["RELEASE"] == "true" else "Prerelease",
+              },
+              "info": {
+                  "0409": {
+                      "CompanyName": "Nemo Xiong",
+                      "FileDescription": "Portable SSH manager with an encrypted SQLite vault, a CLI and a TUI.",
+                      "FileVersion": tag,
+                      "InternalName": name,
+                      # 2024 is the year of the repository's first commit.
+                      "LegalCopyright": "Copyright © 2024 Nemo Xiong",
+                      "OriginalFilename": f"{name}.exe",
+                      "ProductName": "nermius",
+                      "ProductVersion": tag,
+                  },
+              },
+          }
+          print(json.dumps({"RT_VERSION": {"#1": {"0000": version_info}}}, indent=2))
+          PY
+          cat winres.json
+          # GOOS and GOARCH are not set in this step, so go-winres itself is
+          # built for the runner; --arch picks the object file's target.
+          go run github.com/tc-hib/go-winres@v0.3.3 make --in winres.json --out rsrc --arch "${TARGET_ARCH}"
+          test -s "rsrc_windows_${TARGET_ARCH}.syso"
+          ls -l rsrc_windows_*.syso
+
       - name: Build binary
         shell: bash
         env:

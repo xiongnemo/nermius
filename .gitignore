@@ -27,6 +27,10 @@ go.work.sum
 # env file
 .env
 
+# Windows version resources generated in CI by go-winres
+rsrc_windows_*.syso
+winres.json
+
 # Sensitive Termius plaintext exports
 termius-*.json
 
